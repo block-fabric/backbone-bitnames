@@ -11,6 +11,7 @@
 #include <bitnames/app.h>
 
 #include <bt/frost.h>
+#include <bt/fsperm.h>
 #include <bt/jsonrpc.h>
 #include <bt/log.h>
 #include <bt/parse.h>
@@ -243,8 +244,10 @@ int main(int argc, char** argv)
     std::signal(SIGTERM, on_signal);
     bt::frost::init();
     std::string wdir = wallet_dir ? *wallet_dir : cfg.datadir;
-    std::error_code ec;
-    std::filesystem::create_directories(wdir, ec);
+    if (!bt::fsperm::private_dir(cfg.datadir) || !bt::fsperm::private_dir(wdir)) { // the wallet holds the seed
+        LOG_ERROR("cannot create %s / %s", cfg.datadir.c_str(), wdir.c_str());
+        return 1;
+    }
     Node node(cfg);
     std::unique_ptr<Wallet> wallet;
     try {
