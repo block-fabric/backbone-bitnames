@@ -188,3 +188,34 @@ TEST(betanet_replay_census)
     }
     CHECK(multi > 0);
 }
+
+#include <bitnames/json.h>
+
+TEST(betanet_registration_json_shapes)
+{
+    // The live registration 81bd13db... carries commitment + v4 34.24.210.169:6002 + an
+    // encryption key + a signing key (study §2); check the serde_json forms we serve.
+    bt::kv::MemStore store;
+    State st;
+    auto r = fixture::replay(data(), st, store);
+    REQUIRE(r.error.empty());
+    bt::kv::Txn t(store);
+    bool found = false;
+    for (auto& [name, rec] : st.bitnames(t)) {
+        auto d = rec.current();
+        if (!d.data.socket_addr_v4) continue;
+        UniValue j = json::bitname_data(d);
+        std::fprintf(stderr, "  %s\n", j.write().c_str());
+        CHECK_EQ(j["socket_addr_v4"].get_str(), std::string("34.24.210.169:6002"));
+        CHECK(j["commitment"].isArray() && j["commitment"].size() == 32);
+        CHECK(j["encryption_pubkey"].get_str().rfind("bn-enc1", 0) == 0);
+        CHECK(j["signing_pubkey"].get_str().rfind("bn-svk1", 0) == 0);
+        CHECK(vk_from_string(j["signing_pubkey"].get_str()) == d.data.signing_pubkey);
+        CHECK(epk_from_string(j["encryption_pubkey"].get_str()) == d.data.encryption_pubkey);
+        CHECK(seq_id_from_string(j["seq_id"].get_str()) == std::optional<uint32_t>(d.seq_id));
+        found = true;
+    }
+    CHECK(found);
+    // the first registration ever has seq 0 = "1739-0029" (study §2)
+    CHECK_EQ(seq_id_to_string(0), std::string("1739-0029"));
+}
