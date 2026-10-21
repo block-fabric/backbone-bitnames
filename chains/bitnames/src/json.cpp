@@ -489,10 +489,10 @@ static Content parse_content(const UniValue& c)
     if (c.isStr()) {
         if (c.get_str() == "BitName") r.kind = Content::BitName;
         else if (c.get_str() == "BitNameReservation") r.kind = Content::BitNameReservation;
-        else throw Error("invalid content variant", &v);
+        else throw Error("invalid content variant", &c);
         return r;
     }
-    if (!c.isObject() || c.size() != 1) throw Error("invalid content", &v);
+    if (!c.isObject() || c.size() != 1) throw Error("invalid content", &c);
     const std::string& k = c.getKeys()[0];
     const UniValue& x = c.getValues()[0];
     if (k == "BitcoinSats") {
@@ -504,7 +504,7 @@ static Content parse_content(const UniValue& c)
         r.main_fee = parse_u64(x["main_fee_sats"]);
         r.main_address = parse_btc_address(x["main_address"]);
     } else {
-        throw Error("invalid content variant", &v);
+        throw Error("invalid content variant", &c);
     }
     return r;
 }
