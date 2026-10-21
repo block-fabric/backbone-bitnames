@@ -2,6 +2,11 @@
 // Distributed under the MIT software license.
 #include <bitnames/json.h>
 
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+
 #include <bt/parse.h>
 
 #include <cstring>
@@ -65,7 +70,7 @@ UniValue filled_content(const FilledContent& c)
     case FilledContent::BitNameReservation: {
         UniValue p = arr();
         p.push_back(hash(c.reservation_txid));
-        p.push_back(hash(c.reservation_commitment));
+        p.push_back(UniValue("0x" + bt::hex_encode(c.reservation_commitment))); // const_hex::serde: 0x-prefixed
         return tagged("BitNameReservation", p);
     }
     }
@@ -173,7 +178,7 @@ UniValue signature(const bt::frost::Signature& s)
 {
     Bytes b(s.R.begin(), s.R.end());
     b.insert(b.end(), s.z.begin(), s.z.end());
-    return UniValue(bt::hex_encode(b));
+    return UniValue("0x" + bt::hex_encode(b)); // const_hex: 0x-prefixed
 }
 
 UniValue txdata(const TxData& d)
@@ -310,67 +315,144 @@ UniValue withdrawal_bundle(const WithdrawalBundle& w)
 }
 
 // ------------------------------------------------------------------ parsing
-uint64_t parse_u64(const UniValue& v)
+std::string serde_unexpected(const UniValue& v)
 {
-    if (!v.isNum()) throw Error("expected an integer");
+    if (v.isNull()) return "null";
+    if (v.isBool()) return std::string("boolean `") + (v.get_bool() ? "true" : "false") + "`";
+    if (v.isArray()) return "sequence";
+    if (v.isObject()) return "map";
+    if (v.isStr()) {
+        // Rust's Debug of a str.
+        std::string r = "string \"";
+        for (unsigned char ch : v.get_str()) {
+            if (ch == '"') r += "\\\"";
+            else if (ch == '\\') r += "\\\\";
+            else if (ch == '\n') r += "\\n";
+            else if (ch == '\t') r += "\\t";
+            else if (ch == '\r') r += "\\r";
+            else if (ch < 0x20 || ch == 0x7f) {
+                char b[16];
+                std::snprintf(b, sizeof(b), "\\u{%x}", ch);
+                r += b;
+            } else r += char(ch);
+        }
+        return r + "\"";
+    }
     const std::string& s = v.getValStr();
-    if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos) throw Error("expected an unsigned integer");
-    auto x = bt::parse_u64(s);
-    if (!x) throw Error("integer out of range");
+    if (s.find_first_of(".eE") != std::string::npos) {
+        // serde_json reads it as an f64; Rust's Display of an f64: the shortest form, no ".0" when integral.
+        double d = std::strtod(s.c_str(), nullptr);
+        char b[64];
+        for (int prec = 1; prec <= 17; prec++) {
+            std::snprintf(b, sizeof(b), "%.*g", prec, d);
+            if (std::strtod(b, nullptr) == d) break;
+        }
+        std::string f = b;
+        if (f.find('e') != std::string::npos && d == std::floor(d)) {
+            std::snprintf(b, sizeof(b), "%.0f", d);
+            f = b;
+        }
+        return "floating point `" + f + "`";
+    }
+    return "integer `" + s + "`";
+}
+
+static uint64_t parse_uint(const UniValue& v, uint64_t max, const char* type)
+{
+    if (!v.isNum()) throw Error("invalid type: " + serde_unexpected(v) + ", expected " + type, &v);
+    const std::string& s = v.getValStr();
+    if (s.find_first_of(".eE") != std::string::npos) throw Error("invalid type: " + serde_unexpected(v) + ", expected " + type, &v);
+    auto x = s.empty() || s[0] == '-' ? std::nullopt : bt::parse_u64(s);
+    if (!x || *x > max) throw Error("invalid value: " + serde_unexpected(v) + ", expected " + type, &v);
     return *x;
 }
 
-uint32_t parse_u32(const UniValue& v)
+uint64_t parse_u64(const UniValue& v) { return parse_uint(v, UINT64_MAX, "u64"); }
+uint32_t parse_u32(const UniValue& v) { return uint32_t(parse_uint(v, UINT32_MAX, "u32")); }
+
+void require_struct(const UniValue& v, const char* name, std::initializer_list<const char*> fields)
 {
-    uint64_t x = parse_u64(v);
-    if (x > UINT32_MAX) throw Error("integer out of range");
-    return uint32_t(x);
+    if (!v.isObject()) throw Error("invalid type: " + serde_unexpected(v) + ", expected struct " + name, &v);
+    for (const char* f : fields)
+        if (!v.exists(f)) throw Error(std::string("missing field `") + f + "`", &v);
 }
 
 Bytes parse_hex(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected a hex string");
+    if (!v.isStr()) throw Error("expected a hex string", &v);
     auto b = bt::hex_decode(v.get_str());
-    if (!b) throw Error("invalid hex");
+    if (!b) throw Error("invalid hex", &v);
     return *b;
+}
+
+// const-hex's decode_to_array, which the 32-byte hashes' serde uses: an optional 0x prefix, then an odd length,
+// the length, the first character that is not hex, in its words.
+static std::string rust_char_debug(unsigned char b)
+{
+    switch (b) {
+    case 0: return "'\\0'";
+    case '\t': return "'\\t'";
+    case '\n': return "'\\n'";
+    case '\r': return "'\\r'";
+    case '\'': return "'\\''";
+    case '\\': return "'\\\\'";
+    }
+    char buf[16];
+    if (b < 0x20 || b == 0x7f) {
+        std::snprintf(buf, sizeof(buf), "'\\u{%x}'", b);
+        return buf;
+    }
+    if (b < 0x80) return std::string("'") + char(b) + "'";
+    return std::string("'") + char(0xc0 | (b >> 6)) + char(0x80 | (b & 0x3f)) + "'";
 }
 
 Hash32 parse_hash(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected a hex string");
-    auto h = bt::hex_to_array<32>(v.get_str());
-    if (!h) throw Error("invalid hash");
+    if (!v.isStr()) throw Error("expected a hex string", &v);
+    std::string s = v.get_str();
+    if (s.rfind("0x", 0) == 0) s = s.substr(2);
+    if (s.size() % 2) throw Error("odd number of digits", &v);
+    if (s.size() != 64) throw Error("invalid string length", &v);
+    for (size_t i = 0; i < s.size(); i++)
+        if (!std::isxdigit((unsigned char)s[i])) throw Error("invalid character " + rust_char_debug((unsigned char)s[i]) + " at position " + std::to_string(i), &v);
+    auto h = bt::hex_to_array<32>(s);
+    if (!h) throw Error("invalid hash", &v);
     return *h;
 }
 Hash32 parse_btc_hash(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected a hex string");
+    if (!v.isStr()) throw Error("expected a hex string", &v);
     auto h = bt::hash_from_rev_hex(v.get_str());
-    if (!h) throw Error("invalid hash");
+    if (!h) throw Error("invalid hash", &v);
     return *h;
 }
 Address parse_address(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected an address string");
+    if (!v.isStr()) throw Error("expected an address string", &v);
+    // plain_bitnames_types::ParseAddress: "bs58 error", or "wrong address length {n} != 20".
+    auto d = bt::base58_decode(v.get_str());
+    if (!d) throw Error("bs58 error", &v);
+    if (d->size() != 20) throw Error("wrong address length " + std::to_string(d->size()) + " != 20", &v);
     auto a = Address::from_base58(v.get_str());
-    if (!a) throw Error("invalid address");
+    if (!a) throw Error("invalid address", &v);
     return *a;
 }
 bt::btc::Address parse_btc_address(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected a bitcoin address");
+    if (!v.isStr()) throw Error("expected a bitcoin address", &v);
     auto a = bt::btc::Address::parse(v.get_str());
-    if (!a) throw Error("invalid bitcoin address");
+    // rust-bitcoin 0.32 falls back to base58 when bech32 does not decode: "base58 error".
+    if (!a) throw Error(bt::base58check_decode(v.get_str()) ? "invalid bitcoin address" : "base58 error", &v);
     return *a;
 }
 
 static Hash32 parse_byte_array32(const UniValue& v)
 {
-    if (!v.isArray() || v.size() != 32) throw Error("expected an array of 32 bytes");
+    if (!v.isArray() || v.size() != 32) throw Error("expected an array of 32 bytes", &v);
     Hash32 h;
     for (size_t i = 0; i < 32; i++) {
         uint64_t b = parse_u64(v[i]);
-        if (b > 255) throw Error("byte out of range");
+        if (b > 255) throw Error("byte out of range", &v);
         h[i] = uint8_t(b);
     }
     return h;
@@ -378,23 +460,23 @@ static Hash32 parse_byte_array32(const UniValue& v)
 
 OutPoint parse_outpoint(const UniValue& v)
 {
-    if (!v.isObject() || v.size() != 1) throw Error("invalid OutPoint");
+    if (!v.isObject() || v.size() != 1) throw Error("invalid OutPoint", &v);
     const std::string& k = v.getKeys()[0];
     const UniValue& x = v.getValues()[0];
     OutPoint o;
     if (k == "Deposit") {
-        if (!x.isStr()) throw Error("invalid deposit outpoint");
+        if (!x.isStr()) throw Error("invalid deposit outpoint", &v);
         auto s = x.get_str();
         auto c = s.rfind(':');
-        if (c == std::string::npos) throw Error("invalid deposit outpoint");
+        if (c == std::string::npos) throw Error("invalid deposit outpoint", &v);
         o.kind = OutPoint::Deposit;
         o.txid = parse_btc_hash(UniValue(s.substr(0, c)));
         auto vout = bt::parse_u64(s.substr(c + 1));
-        if (!vout || *vout > UINT32_MAX) throw Error("invalid deposit outpoint");
+        if (!vout || *vout > UINT32_MAX) throw Error("invalid deposit outpoint", &v);
         o.vout = uint32_t(*vout);
         return o;
     }
-    if (k != "Regular" && k != "Coinbase") throw Error("invalid OutPoint variant");
+    if (k != "Regular" && k != "Coinbase") throw Error("invalid OutPoint variant", &v);
     o.kind = k == "Regular" ? OutPoint::Regular : OutPoint::Coinbase;
     o.txid = parse_hash(x["txid"]);
     o.vout = parse_u32(x["vout"]);
@@ -407,10 +489,10 @@ static Content parse_content(const UniValue& c)
     if (c.isStr()) {
         if (c.get_str() == "BitName") r.kind = Content::BitName;
         else if (c.get_str() == "BitNameReservation") r.kind = Content::BitNameReservation;
-        else throw Error("invalid content variant");
+        else throw Error("invalid content variant", &v);
         return r;
     }
-    if (!c.isObject() || c.size() != 1) throw Error("invalid content");
+    if (!c.isObject() || c.size() != 1) throw Error("invalid content", &v);
     const std::string& k = c.getKeys()[0];
     const UniValue& x = c.getValues()[0];
     if (k == "BitcoinSats") {
@@ -422,14 +504,14 @@ static Content parse_content(const UniValue& c)
         r.main_fee = parse_u64(x["main_fee_sats"]);
         r.main_address = parse_btc_address(x["main_address"]);
     } else {
-        throw Error("invalid content variant");
+        throw Error("invalid content variant", &v);
     }
     return r;
 }
 
 Output parse_output(const UniValue& v)
 {
-    if (!v.isObject()) throw Error("invalid output");
+    if (!v.isObject()) throw Error("invalid output", &v);
     Output o;
     o.address = parse_address(v["address"]);
     o.content = parse_content(v["content"]);
@@ -439,32 +521,32 @@ Output parse_output(const UniValue& v)
 
 bt::frost::Point parse_vk(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected a verifying key");
+    if (!v.isStr()) throw Error("expected a verifying key", &v);
     auto k = vk_from_string(v.get_str());
-    if (!k) throw Error("invalid verifying key");
+    if (!k) throw Error("invalid verifying key", &v);
     return *k;
 }
 
 bt::ByteArray<32> parse_epk(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected an encryption pubkey");
+    if (!v.isStr()) throw Error("expected an encryption pubkey", &v);
     auto k = epk_from_string(v.get_str());
-    if (!k) throw Error("invalid encryption pubkey");
+    if (!k) throw Error("parsing failed", &v); // their EncryptionPubKey's FromStr error
     return *k;
 }
 
 static SocketV4 parse_v4(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected a socket address");
+    if (!v.isStr()) throw Error("expected a socket address", &v);
     auto s = SocketV4::parse(v.get_str());
-    if (!s) throw Error("invalid socket address");
+    if (!s) throw Error("invalid socket address", &v);
     return *s;
 }
 static SocketV6 parse_v6(const UniValue& v)
 {
-    if (!v.isStr()) throw Error("expected a socket address");
+    if (!v.isStr()) throw Error("expected a socket address", &v);
     auto s = SocketV6::parse(v.get_str());
-    if (!s) throw Error("invalid socket address");
+    if (!s) throw Error("invalid socket address", &v);
     return *s;
 }
 
@@ -472,7 +554,7 @@ MutableBitNameData parse_mutable_data(const UniValue& v)
 {
     MutableBitNameData d;
     if (v.isNull()) return d;
-    if (!v.isObject()) throw Error("invalid bitname data");
+    if (!v.isObject()) throw Error("invalid bitname data", &v);
     auto f = [&](const char* k) -> const UniValue* {
         const UniValue& x = v[k];
         return x.isNull() ? nullptr : &x;
@@ -493,10 +575,10 @@ static Update<T> parse_update(const UniValue& v, F f)
     if (v.isStr()) {
         if (v.get_str() == "Delete") u.kind = Update<T>::Delete;
         else if (v.get_str() == "Retain") u.kind = Update<T>::Retain;
-        else throw Error("invalid update");
+        else throw Error("invalid update", &v);
         return u;
     }
-    if (!v.isObject() || v.size() != 1 || v.getKeys()[0] != "Set") throw Error("invalid update");
+    if (!v.isObject() || v.size() != 1 || v.getKeys()[0] != "Set") throw Error("invalid update", &v);
     u.kind = Update<T>::Set;
     u.value = f(v.getValues()[0]);
     return u;
@@ -504,18 +586,19 @@ static Update<T> parse_update(const UniValue& v, F f)
 
 bt::frost::Signature parse_signature(const UniValue& v)
 {
-    Bytes b = parse_hex(v);
-    if (b.size() != 64) throw Error("invalid signature length");
+    // const_hex: an optional 0x prefix (theirs writes it).
+    Bytes b = parse_hex(v.isStr() && v.get_str().rfind("0x", 0) == 0 ? UniValue(v.get_str().substr(2)) : v);
+    if (b.size() != 64) throw Error("invalid signature length", &v);
     bt::frost::Signature s;
     std::memcpy(s.R.data(), b.data(), 32);
     std::memcpy(s.z.data(), b.data() + 32, 32);
-    if (!bt::frost::valid_element(s.R) || !bt::frost::canonical_scalar(s.z)) throw Error("invalid signature encoding");
+    if (!bt::frost::valid_element(s.R) || !bt::frost::canonical_scalar(s.z)) throw Error("invalid signature encoding", &v);
     return s;
 }
 
 TxData parse_txdata(const UniValue& v)
 {
-    if (!v.isObject() || v.size() != 1) throw Error("invalid transaction data");
+    if (!v.isObject() || v.size() != 1) throw Error("invalid transaction data", &v);
     const std::string& k = v.getKeys()[0];
     const UniValue& x = v.getValues()[0];
     TxData d;
@@ -538,19 +621,19 @@ TxData parse_txdata(const UniValue& v)
     } else if (k == "BatchIcann") {
         d.kind = TxData::BatchIcann;
         for (auto& n : x["plain_names"].getValues()) {
-            if (!n.isStr()) throw Error("invalid plain name");
+            if (!n.isStr()) throw Error("invalid plain name", &v);
             d.icann.plain_names.push_back(n.get_str());
         }
         d.icann.signature = parse_signature(x["signature"]);
     } else {
-        throw Error("invalid transaction data variant");
+        throw Error("invalid transaction data variant", &v);
     }
     return d;
 }
 
 Transaction parse_transaction(const UniValue& v)
 {
-    if (!v.isObject()) throw Error("invalid transaction");
+    require_struct(v, "Transaction", {"inputs", "outputs", "memo"});
     Transaction t;
     for (auto& in : v["inputs"].getValues()) t.inputs.push_back(parse_outpoint(in));
     for (auto& o : v["outputs"].getValues()) t.outputs.push_back(parse_output(o));
@@ -561,13 +644,13 @@ Transaction parse_transaction(const UniValue& v)
 
 static Authorization parse_authorization(const UniValue& v)
 {
-    if (!v.isObject()) throw Error("invalid authorization");
+    if (!v.isObject()) throw Error("invalid authorization", &v);
     return Authorization{parse_vk(v["verifying_key"]), parse_signature(v["signature"])};
 }
 
 AuthorizedTransaction parse_authorized_transaction(const UniValue& v)
 {
-    if (!v.isObject()) throw Error("invalid authorized transaction");
+    require_struct(v, "Authorized", {"transaction", "authorizations"});
     AuthorizedTransaction t;
     t.transaction = parse_transaction(v["transaction"]);
     for (auto& a : v["authorizations"].getValues()) t.authorizations.push_back(parse_authorization(a));
@@ -576,7 +659,7 @@ AuthorizedTransaction parse_authorized_transaction(const UniValue& v)
 
 Header parse_header(const UniValue& v)
 {
-    if (!v.isObject()) throw Error("invalid header");
+    require_struct(v, "Header", {"merkle_root", "prev_main_hash"});
     Header h;
     h.merkle_root = parse_hash(v["merkle_root"]);
     if (!v["prev_side_hash"].isNull()) h.prev_side_hash = parse_hash(v["prev_side_hash"]);
@@ -586,7 +669,7 @@ Header parse_header(const UniValue& v)
 
 Body parse_body(const UniValue& v)
 {
-    if (!v.isObject()) throw Error("invalid body");
+    require_struct(v, "Body", {"coinbase", "transactions", "authorizations"});
     Body b;
     const UniValue& cb = v["coinbase"];
     b.coinbase.memo = parse_hex(cb["memo"]);

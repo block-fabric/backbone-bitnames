@@ -440,7 +440,7 @@ size_t Node::rebroadcast_transaction(const Hash32& txid)
     {
         std::lock_guard<std::recursive_mutex> l(mu_);
         auto it = mempool_.find(txid);
-        if (it == mempool_.end()) throw StateError("Missing transaction " + bt::hex_encode(txid));
+        if (it == mempool_.end()) throw StateError("mempool error: Missing transaction " + bt::hex_encode(txid));
         tx = it->second;
     }
     return broadcast_transaction(tx);

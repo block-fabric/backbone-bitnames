@@ -165,21 +165,11 @@ std::map<OutPoint, FilledOutput> App::get_paymail()
 // ------------------------------------------------------------------ RPC
 namespace {
 
-struct ParamError : bt::jsonrpc::RpcError {
-    ParamError() : RpcError(-32602, "Invalid params") {}
-};
-
-// jsonrpsee answers -32602 when a parameter does not deserialize.
+// jsonrpsee answers -32602 when a parameter does not deserialize: json::Error is that error (with serde's cause).
 template <class F>
 auto P(F f)
 {
-    return [f](const Params& p) -> UniValue {
-        try {
-            return f(p);
-        } catch (const json::Error&) {
-            throw ParamError();
-        }
-    };
+    return [f](const Params& p) -> UniValue { return f(p); };
 }
 
 std::set<Address> parse_addresses(const UniValue& v)
@@ -237,7 +227,7 @@ void register_rpc(bt::jsonrpc::Server& s, App& app, bool public_api, bool privat
         s.add("bitname_data", {"bitname_id"}, 1, P([&n](const Params& p) -> UniValue {
                   Hash32 name = json::parse_hash(p[0]);
                   auto d = n.bitname_current(name);
-                  if (!d) throw app_error("Missing BitName data for " + bt::hex_encode(name));
+                  if (!d) throw app_error("state error: Missing BitName " + bt::hex_encode(name));
                   return json::bitname_data(*d);
               }));
         s.add("bitnames", {}, 0, [&n](const Params&) {
@@ -251,6 +241,7 @@ void register_rpc(bt::jsonrpc::Server& s, App& app, bool public_api, bool privat
             return a;
         });
         s.add("connect_block", {"block", "main_block_hash"}, 2, P([&app](const Params& p) {
+                  json::require_struct(p[0], "Block", {"header", "body"});
                   Header h = json::parse_header(p[0]["header"]);
                   Body b = json::parse_body(p[0]["body"]);
                   return UniValue(app.connect_block(h, b, json::parse_btc_hash(p[1])));
@@ -270,7 +261,7 @@ void register_rpc(bt::jsonrpc::Server& s, App& app, bool public_api, bool privat
         s.add("get_block_index", {"block_hash"}, 1, P([&n](const Params& p) {
                   Hash32 h = json::parse_hash(p[0]);
                   auto b = n.body(h);
-                  if (!b) throw app_error("NoBody " + bt::hex_encode(h));
+                  if (!b) throw app_error("archive error: no block body with hash " + bt::hex_encode(h));
                   auto ev = n.block_index_events(h);
                   if (!ev) throw app_error("Block " + bt::hex_encode(h) + " is not in the current chain");
                   UniValue r(UniValue::VOBJ), txs = arr(), deps = arr(), spends = arr();

@@ -9,6 +9,7 @@
 
 #include <bitnames/state.h>
 
+#include <bt/jsonrpc.h>
 #include <univalue.h>
 
 namespace bitnames::json {
@@ -40,9 +41,15 @@ UniValue block(const Header& h, const Body& b, uint32_t height);
 UniValue bitcoin_tx(const std::vector<bt::btc::TxOut>& outs);
 UniValue withdrawal_bundle(const WithdrawalBundle& w);
 
-struct Error : std::runtime_error {
-    using std::runtime_error::runtime_error;
+/** A request value that does not parse: jsonrpsee's -32602 "Invalid params", the cause (serde's) as data;
+ *  `at`: the value it is about (the server adds serde_json's position of it). */
+struct Error : bt::jsonrpc::RpcError {
+    explicit Error(const std::string& cause, const UniValue* at = nullptr) : bt::jsonrpc::RpcError(-32602, "Invalid params", cause, at) {}
 };
+/** serde's Unexpected of a JSON value ("string \"x\"", "integer `5`", "sequence", ...). */
+std::string serde_unexpected(const UniValue& v);
+/** serde's derived Deserialize of a struct: an object with the (non-Option) `fields`, else serde's error. */
+void require_struct(const UniValue& v, const char* name, std::initializer_list<const char*> fields);
 Hash32 parse_hash(const UniValue& v);
 Hash32 parse_btc_hash(const UniValue& v);
 Address parse_address(const UniValue& v);

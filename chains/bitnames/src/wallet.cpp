@@ -118,7 +118,7 @@ void Wallet::set_seed(const bt::ByteArray<64>& s)
 void Wallet::set_seed_from_mnemonic(const std::string& mnemonic)
 {
     auto p = bt::hd::parse_mnemonic(mnemonic);
-    if (!p) throw WalletError("invalid mnemonic");
+    if (!p) throw WalletError("failed to parse mnemonic seed phrase: " + bt::hd::mnemonic_error(mnemonic));
     set_seed(bt::hd::mnemonic_to_seed(*p));
 }
 
@@ -412,7 +412,7 @@ Transaction Wallet::register_bitname(const std::string& plain, const MutableBitN
         t.put(W_KNOWN_NAMES, name.span(), ByteSpan((const uint8_t*)plain.data(), plain.size()));
         t.commit();
     }
-    if (!found) throw WalletError("No reservation for bitname " + plain);
+    if (!found) throw WalletError("could not find bitname reservation for `" + plain + "`");
     Transaction tx;
     tx.inputs.push_back(found->first);
     Output o;
