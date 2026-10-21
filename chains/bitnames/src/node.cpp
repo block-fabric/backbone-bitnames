@@ -1090,14 +1090,19 @@ void Node::handle_peer_state(bt::quic::ConnId c, const PeerState& ps)
 
 void Node::on_headers(bt::quic::ConnId c, const TipInfo& target, const std::vector<Header>& hs)
 {
-    for (auto& h : hs) {
-        if (!request_mainchain_ancestor_infos(h.prev_main_hash)) return;
+    std::set<Hash32> mains;
+    for (auto& h : hs)
+        if (mains.insert(h.prev_main_hash).second && !request_mainchain_ancestor_infos(h.prev_main_hash)) return;
+    {
+        // one store transaction for the whole batch (one fsync instead of one per header)
         LOCKED;
-        Hash32 bh = h.hash();
-        if (archive_.header(t, bh)) continue;
-        if (archive_.invalid(t, bh)) return;
-        if (h.prev_side_hash && !archive_.header(t, *h.prev_side_hash)) return;
-        archive_.put_header(t, h);
+        for (auto& h : hs) {
+            Hash32 bh = h.hash();
+            if (archive_.header(t, bh)) continue;
+            if (archive_.invalid(t, bh)) break;
+            if (h.prev_side_hash && !archive_.header(t, *h.prev_side_hash)) break;
+            archive_.put_header(t, h);
+        }
         t.commit();
     }
     {

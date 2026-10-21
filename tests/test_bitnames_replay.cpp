@@ -104,6 +104,9 @@ TEST(betanet_replay_all_checks)
     CHECK_EQ(incl_2205, 1081u);
     CHECK_EQ(ids_2205.size(), size_t(151));
     bt::kv::Txn t(store);
+    size_t dep_events = 0;
+    for (uint32_t h = 0; h <= *st.height(t); h++) dep_events += st.block_index_events(t, h).deposits.size();
+    CHECK_EQ(dep_events, size_t(12)); // get_block_index deposits = the enforcer's 12 deposit events
     std::fprintf(stderr, "  tip height %u, %zu utxos, %zu stxos, %zu names, %zu open reservations, wealth %llu sats\n", *st.height(t), st.utxos(t).size(),
                  st.stxos(t).size(), st.bitnames(t).size(), st.reservations(t).size(), (unsigned long long)st.sidechain_wealth(t));
     for (auto& [name, rec] : st.bitnames(t))
