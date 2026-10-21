@@ -101,8 +101,9 @@ plain-bitnames 0.17.2 has no betanet network and different hashes; it is not the
      block stays in the tip set. Reconnecting a commitment to a block already in the set does
      not re-order it (`:214-233`).
    * After every mainchain event (`net_task.rs:928-980`) the node disconnects state tips that
-     are **not in the tip set** (never the case after a mainchain reorg; and then without the
-     2WPD and the mempool, `:943`), then `reorg_to_tip(best ordered tip)`, which moves only when
+     are **not in the tip set** (never the case after a mainchain reorg; theirs then skips the
+     2WPD and the mempool, `:943`; ours disconnects properly, reachable only after
+     `--bt-rebuild-side-tips` or `invalidate_block`), then `reorg_to_tip(best ordered tip)`, which moves only when
      `better_tip` prefers it. The state tip is compared with its best Verified BMM block, stale
      or not (`get_best_main_verification`).
    * Peer tips and `submit_block` tips are reorged to only when they are in the tip set and
@@ -117,7 +118,11 @@ plain-bitnames 0.17.2 has no betanet network and different hashes; it is not the
    failed BMM) or is no longer ordered (the block's main block disconnected, reconnected and
    disconnected again) fails with `missing sidechain tip`; their mainchain task fails the same
    way on every retry and the side tips stay at the old mainchain tip (peers on the new branch
-   ignored). Ours logs `Mainchain task error` and retries on every poll, as theirs.
+   ignored). **Switch** `REPRODUCE_SIDE_TIPS_HALT` (`side_tips.h`, default `false` pending the
+   user's decision): `true` reproduces the halt (ours logs `Mainchain task error` and retries
+   on every poll, as theirs); `false` logs a warning and treats that commitment as a no-op, so
+   our node keeps following the mainchain (liveness only: while their nodes follow, the
+   connected blocks are the same). Tests cover both.
    Thunder: thunder-rust 244e20f has the same side-tips code (archive, `side_tips`,
    `sync_side_tips_to_tip` identical), but its live `DisconnectBlock` handler passes the block
    itself as the parent (`mainchain_task.rs:442-447`) and the app exits; after a restart the
@@ -146,6 +151,16 @@ Where their node panics (assert/expect) ours rejects (`StateError::panic`).
   then). Peer sync is the simplified decision table of backbone-thunder plus their side-tips
   gates (same outcome, traffic may differ). A datadir from before the side-tips port rebuilds
   the index from the mainchain on first start (one pass over all mainchain blocks).
+  `--bt-rebuild-side-tips` (operator) drops and rebuilds the index the same way; state blocks
+  outside the rebuilt index (e.g. kept after a mainchain reorg) are then disconnected.
+* `invalidate_block` also removes the block and its descendants from the side-tips index, and
+  neither the mainchain events, `submit_block`/peer tips nor `reorg_to_tip` ever select an
+  invalidated block (theirs deletes its header and body; their tip index still names it).
+* Peer block bodies (theirs store any body whose header hash matches and fail it at connect):
+  ours refuses an oversized body and fully prevalidates a body whose parent is our tip
+  (merkle root with the 1000-tx switch, fees, authorizations) before storing it, and bans the
+  peer; a body that fails at connect is deleted (re-requested) and the peer that sent the
+  tip is banned (theirs drops it). Stricter, consensus-neutral.
 
 ## Remaining
 

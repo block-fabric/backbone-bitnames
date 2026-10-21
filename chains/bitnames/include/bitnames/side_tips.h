@@ -23,6 +23,14 @@
 
 namespace bitnames {
 
+/** THE switch for their side-tips halt (side_tips/mod.rs:339-352): disconnecting a main block
+ *  whose BMM commitment is outside the tip set, or no longer ordered, fails their mainchain
+ *  sync on every retry (their node freezes at the old mainchain tip). true = reproduce it;
+ *  false (default, pending the user's decision) = log a warning and treat the commitment as
+ *  a no-op. A liveness choice: which sidechain blocks are connected does not depend on it
+ *  while their nodes still follow the mainchain. */
+inline constexpr bool REPRODUCE_SIDE_TIPS_HALT = false;
+
 /** side_tips/mod.rs SidechainTipInfo. `work` = total work of `main_block_hash`. */
 struct SideTipInfo {
     uint32_t sidechain_height = 0;
@@ -39,6 +47,12 @@ public:
 
 class SideTips {
 public:
+    /** Defaults to REPRODUCE_SIDE_TIPS_HALT; tests cover both. */
+    bool halt_on_missing_commitment = REPRODUCE_SIDE_TIPS_HALT;
+    /** Operator rebuild (--bt-rebuild-side-tips): drop the index; the next mainchain sync
+     *  rebuilds it from the active mainchain. */
+    void clear(bt::kv::Txn& t) const;
+
     // T_MAIN_TIP: () -> main block hash (absent = none, their `tip_info: None`).
     // T_TIPS: side hash -> info (`sidechain_tips`).
     // T_ORDERED: height BE || work BE || main hash -> side hash (`ordered_sidechain_tips`,

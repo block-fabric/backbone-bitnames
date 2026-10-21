@@ -39,6 +39,7 @@ struct NodeConfig {
     bool use_seeds = true;
     bool p2p = true;
     std::optional<bt::quic::SockAddr> zmq_addr; // nullopt: no publisher
+    bool rebuild_side_tips = false;             // --bt-rebuild-side-tips
 };
 
 struct PeerView {
@@ -115,13 +116,15 @@ public:
     void attach_store(std::unique_ptr<bt::kv::Store> s) { store_ = std::move(s); }
     /** Store a header and body as a peer's GetBlock answer does, without reorging. */
     void receive_block(const Header& h, const Body& b);
+    /** The checks a peer's GetBlock body passes before it is stored; empty = accepted. */
+    std::string check_peer_body(const Hash32& block, const Body& b);
     /** node/mod.rs get_transactions(n): mempool in txid order, revalidated, conflicts dropped. */
     std::pair<std::vector<std::pair<AuthorizedTransaction, std::vector<FilledOutput>>>, uint64_t> mempool_transactions(size_t n);
 
     bt::enforcer::Client& enforcer() { return *enforcer_; }
     Archive& archive() { return archive_; }
     State& state() { return state_; }
-    const SideTips& side_tips() const { return side_tips_; }
+    SideTips& side_tips() { return side_tips_; }
     std::recursive_mutex& lock() { return mu_; }
     bt::kv::Store& store() { return *store_; }
     const NodeConfig& config() const { return cfg_; }
@@ -148,7 +151,8 @@ private:
 
     void connect_tip_(bt::kv::Txn& t, const Header& h, const Body& b, const bt::mainchain::TwoWayPegData& d);
     void disconnect_tip_(bt::kv::Txn& t);
-    bool reorg_to_tip(const TipRef& new_tip);
+    /** invalid_body: set when a block on the way failed to connect (its body was deleted). */
+    bool reorg_to_tip(const TipRef& new_tip, bool* invalid_body = nullptr);
     std::vector<Hash32> main_ancestors(const bt::kv::Txn& t, const Hash32& from, const std::optional<Hash32>& stop);
     void mempool_put(const AuthorizedTransaction& tx);
     void mempool_delete(const Hash32& txid);
@@ -156,6 +160,7 @@ private:
     void put_body_(bt::kv::Txn& t, const Hash32& h, const Body& b);
     void delete_body_(bt::kv::Txn& t, const Hash32& h);
     void handle_mainchain_block_event();
+    std::string check_peer_body_(const bt::kv::Txn& t, const Hash32& block, const Body& b);
     bool catch_up_mainchain();
     void mainchain_loop();
     void publish_block(const Hash32& h, uint32_t height);

@@ -210,7 +210,9 @@ TEST(conflicting_commitment_on_the_new_mainchain_waits_for_better_tip)
 
 TEST(reorg_back_and_forth_halts_the_side_tips_sync)
 {
+    // REPRODUCE_SIDE_TIPS_HALT = true (their behaviour)
     Lab l;
+    l.node.side_tips().halt_on_missing_commitment = true;
     l.build_lab_chain();
     l.lab_reorg();
     // back to the first chain (longer now): S3/S4 are in the tip set already, so connecting
@@ -234,7 +236,9 @@ TEST(reorg_back_and_forth_halts_the_side_tips_sync)
 
 TEST(reorg_of_a_commitment_to_an_unknown_block_halts_the_side_tips_sync)
 {
+    // REPRODUCE_SIDE_TIPS_HALT = true (their behaviour)
     Lab l;
+    l.node.side_tips().halt_on_missing_commitment = true;
     l.build_lab_chain();
     Hash32 unknown;
     unknown[0] = 0xee;
@@ -307,4 +311,112 @@ TEST(body_received_after_its_bmm_block_enters_the_tip_set)
     l.main(M(3), M(2));
     CHECK(l.sync(M(3)));
     CHECK(l.tip() == h0.hash());
+}
+
+TEST(default_does_not_halt_on_a_missing_commitment)
+{
+    CHECK(!REPRODUCE_SIDE_TIPS_HALT);
+    {
+        // back and forth over a kept block's BMM block: the sync goes on, the tip stays
+        Lab l;
+        CHECK(!l.node.side_tips().halt_on_missing_commitment);
+        l.build_lab_chain();
+        l.lab_reorg();
+        l.main(M(7), M(6));
+        l.main(M(8), M(7));
+        CHECK(l.sync(M(8)));
+        l.main(M(8, 1), M(7, 1));
+        l.main(M(9, 1), M(8, 1));
+        CHECK(l.sync(M(9, 1)));
+        CHECK(l.side_main_tip() == M(9, 1));
+        CHECK(l.tip() == l.S[4]);
+        CHECK(l.peer_relevant(M(9, 1)));
+        // and the next block on the new mainchain still replaces the kept ones
+        Hash32 s3b = l.block(l.S[2], M(9, 1));
+        l.main(M(10, 1), M(9, 1), s3b);
+        CHECK(l.sync(M(10, 1)));
+        CHECK(l.tip() == s3b);
+    }
+    {
+        // reorg of a commitment to a block never received
+        Lab l;
+        l.build_lab_chain();
+        Hash32 unknown;
+        unknown[0] = 0xee;
+        l.main(M(7), M(6), unknown);
+        CHECK(l.sync(M(7)));
+        l.main(M(7, 2), M(6));
+        l.main(M(8, 2), M(7, 2));
+        CHECK(l.sync(M(8, 2)));
+        CHECK(l.side_main_tip() == M(8, 2));
+        CHECK(l.tip() == l.S[4]);
+    }
+}
+
+TEST(rebuilt_side_tips_follow_the_active_mainchain)
+{
+    // --bt-rebuild-side-tips: the index is rebuilt from the active mainchain; a kept block
+    // whose BMM block is gone is then outside it and is disconnected (with its 2WPD)
+    Lab l;
+    l.build_lab_chain();
+    l.lab_reorg();
+    CHECK(l.tip() == l.S[4]);
+    {
+        Txn t(l.node.store());
+        l.node.side_tips().clear(t);
+        t.commit();
+    }
+    CHECK(l.sync(M(7, 1)));
+    CHECK(!l.in_tips(l.S[3]) && !l.in_tips(l.S[4]));
+    CHECK(l.tip() == l.S[2]);
+    CHECK_EQ(*l.height(), 2u);
+}
+
+TEST(invalidated_block_is_never_reselected)
+{
+    Lab l;
+    l.build_lab_chain();
+    l.node.invalidate_block(l.S[3]);
+    CHECK(l.tip() == l.S[2]);
+    CHECK(!l.in_tips(l.S[3]) && !l.in_tips(l.S[4]));
+    CHECK(l.best() == l.S[2]);
+    CHECK(!l.ready(l.S[3], M(5)) && !l.ready(l.S[4], M(6)));
+    // a later mainchain event does not bring them back
+    l.main(M(7), M(6));
+    CHECK(l.sync(M(7)));
+    CHECK(l.tip() == l.S[2]);
+    // nor does a rebuild of the index (their invalidate_block deletes the body too)
+    {
+        Txn t(l.node.store());
+        l.node.side_tips().clear(t);
+        t.commit();
+    }
+    CHECK(l.sync(M(7)));
+    CHECK(!l.in_tips(l.S[3]) && !l.in_tips(l.S[4]));
+    CHECK(l.tip() == l.S[2]);
+}
+
+TEST(peer_body_is_checked_against_its_header)
+{
+    Lab l;
+    l.build_lab_chain();
+    Header h;
+    h.merkle_root = *compute_merkle_root(Coinbase{}, {});
+    h.prev_side_hash = l.S[4];
+    h.prev_main_hash = M(6);
+    {
+        Txn t(l.node.store());
+        l.node.archive().put_header(t, h);
+        t.commit();
+    }
+    CHECK(l.node.check_peer_body(h.hash(), Body{}).empty());
+    // a body that does not match the header's merkle root (parent = our tip: prevalidated)
+    Body bad;
+    Output o;
+    o.content.kind = Content::Bitcoin;
+    o.content.value = 0;
+    bad.coinbase.outputs.push_back(o);
+    CHECK(!l.node.check_peer_body(h.hash(), bad).empty());
+    // a block whose parent is not our tip cannot be checked without its parent state
+    CHECK(l.node.check_peer_body(l.S[3], bad).empty());
 }

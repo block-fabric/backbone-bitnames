@@ -66,8 +66,9 @@ one generator drives both; `get_block_index` is the best per-block hook.
     both switch to it; (c) a competing block committed on the new branch at lower height:
     both keep the old tip until it is beaten by `better_tip`; (d) mine on a kept block: BMM
     fails on both; (e) reorg back and away again over a kept block's BMM block, and a reorg of
-    a commitment to a block never relayed: both mainchain syncs halt with `missing sidechain
-    tip` (theirs logs `Mainchain task error`) and keep their tips.
+    a commitment to a block never relayed: theirs halts with `missing sidechain tip` (logs
+    `Mainchain task error`) and keeps its tip; ours does the same only when built with
+    `REPRODUCE_SIDE_TIPS_HALT = true` (default: warns and keeps following).
 15. **Mempool/relay**: `submit_transaction`, `broadcast_transaction`,
     `rebroadcast_transaction`, `create_transfer(_many)`, `create_withdrawal`,
     `reserve_bitname`, `register_bitname` on either side, PushTransaction answers

@@ -2,6 +2,8 @@
 // Distributed under the MIT software license.
 #include <bitnames/side_tips.h>
 
+#include <bt/log.h>
+
 #include <deque>
 
 namespace bitnames {
@@ -49,6 +51,13 @@ Bytes SideTips::ordered_key(const SideTipInfo& i)
     w.raw(i.work.to_be());
     w.raw(i.main_block_hash);
     return w.buf;
+}
+
+void SideTips::clear(Txn& t) const
+{
+    t.clear(T_MAIN_TIP);
+    t.clear(T_TIPS);
+    t.clear(T_ORDERED);
 }
 
 std::optional<Hash32> SideTips::mainchain_tip(const Txn& t) const
@@ -148,12 +157,15 @@ void SideTips::disconnect_mainchain_tip(Txn& t, const Archive& a, const std::opt
     if (commitment) {
         auto i = info(t, *commitment);
         // a commitment to a block outside the tip set (unknown, body never received, failed
-        // BMM) fails here: their mainchain task then fails on every retry
-        if (!i) throw SideTipsError("missing sidechain tip (" + side_hex(*commitment) + ")");
-        // a block whose recorded main block was disconnected before (and reconnected: it is
-        // never re-ordered) is no longer ordered: the same error
-        if (i->main_block_hash == tip.hash && !t.del(T_ORDERED, ordered_key(*i)))
-            throw SideTipsError("missing sidechain tip (" + side_hex(*commitment) + ")");
+        // BMM) fails here: their mainchain task then fails on every retry; likewise a block
+        // whose recorded main block was disconnected before (and reconnected: it is never
+        // re-ordered), which is no longer ordered
+        bool missing = !i || (i->main_block_hash == tip.hash && !t.del(T_ORDERED, ordered_key(*i)));
+        if (missing) {
+            std::string e = "missing sidechain tip (" + side_hex(*commitment) + ")";
+            if (halt_on_missing_commitment) throw SideTipsError(e);
+            LOG_WARN("disconnecting mainchain block %s: %s; ignored (their node halts here)", main_hex(tip.hash).c_str(), e.c_str());
+        }
     }
     if (new_tip) t.put(T_MAIN_TIP, unit_key(), new_tip->span());
     else t.del(T_MAIN_TIP, unit_key());
@@ -194,7 +206,8 @@ size_t sync_side_tips(Txn& t, const Archive& a, const SideTips& st, const Hash32
         if (!a.has_main_block_info(t, main)) throw bt::sidechain::ArchiveError("no mainchain block info for block hash " + main_hex(main));
         auto bi = a.main_block_info(t, main);
         std::optional<std::pair<Hash32, std::optional<Hash32>>> commitment;
-        if (bi.bmm_commitment && a.has_body(t, *bi.bmm_commitment)) {
+        // an invalidated block has no body in their archive (invalidate_block deletes it)
+        if (bi.bmm_commitment && a.has_body(t, *bi.bmm_commitment) && !a.invalid(t, *bi.bmm_commitment)) {
             const Hash32& side = *bi.bmm_commitment;
             auto sh = a.need_header(t, side);
             if (!sh.prev_side_hash || st.contains(t, *sh.prev_side_hash)) {
@@ -214,6 +227,7 @@ size_t sync_side_tips(Txn& t, const Archive& a, const SideTips& st, const Hash32
 // archive/mod.rs:672-730
 void side_tips_put_body(Txn& t, const Archive& a, const SideTips& st, const Hash32& block)
 {
+    if (a.invalid(t, block)) return;
     Hash32 main_tip = tip_or_zero(st.mainchain_tip(t));
     std::deque<Hash32> queue;
     auto update = [&](const Hash32& h, const Header& hd) {
@@ -234,7 +248,7 @@ void side_tips_put_body(Txn& t, const Archive& a, const SideTips& st, const Hash
     while (!queue.empty()) {
         Hash32 h = queue.front();
         queue.pop_front();
-        if (!a.has_body(t, h)) continue;
+        if (!a.has_body(t, h) || a.invalid(t, h)) continue;
         update(h, a.need_header(t, h));
     }
 }
@@ -254,7 +268,9 @@ void side_tips_delete_body(Txn& t, const Archive& a, const SideTips& st, const H
 
 bool side_tips_tip_ready(const Txn& t, const Archive& a, const SideTips& st, const TipRef& tip)
 {
-    if (!st.contains(t, tip.block_hash)) return false;
+    // policy: never an operator-invalidated block (its descendants are marked invalid with it
+    // and no new descendant can be stored: the header is gone)
+    if (!st.contains(t, tip.block_hash) || a.invalid(t, tip.block_hash)) return false;
     return a.is_main_descendant(t, tip.main_block_hash, tip_or_zero(st.mainchain_tip(t)));
 }
 

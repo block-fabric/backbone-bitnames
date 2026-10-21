@@ -42,6 +42,12 @@ bool Node::start(std::string& err)
         err = e.what();
         return false;
     }
+    if (cfg_.rebuild_side_tips) {
+        Txn t(*store_);
+        side_tips_.clear(t);
+        t.commit();
+        LOG_INFO("side tips cleared; rebuilt from the mainchain at the first sync");
+    }
     enforcer_ = std::make_unique<bt::enforcer::Client>(cfg_.mainchain_grpc_url, THIS_SIDECHAIN);
     magic_ = cfg_.magic_override ? *cfg_.magic_override : magic_bytes(cfg_.network);
     if (cfg_.zmq_addr) {
@@ -461,6 +467,9 @@ void Node::invalidate_block(const Hash32& h)
             if (!archive_.header(t, *tp) || !archive_.header(t, h) || !archive_.is_descendant(t, h, *tp)) break;
             disconnect_tip_(t);
         }
+        // out of the side-tips index with its descendants (before mark_invalid drops the
+        // successor lists), so the best ordered tip is never an invalidated block
+        if (archive_.header(t, h)) side_tips_delete_body(t, archive_, side_tips_, h);
         archive_.mark_invalid(t, h);
         t.commit();
     }
@@ -633,17 +642,17 @@ void Node::handle_mainchain_block_event()
         LOCKED;
         while (auto tp = state_.tip(t)) {
             if (side_tips_.contains(t, *tp)) break;
-            // Their state.disconnect_tip only: no 2WPD disconnect and no mempool re-add
-            // (net_task.rs:943). A mainchain reorg never gets here: blocks leave the tip set
-            // only when their body is deleted as invalid, which never happens to a state block.
-            Header h = archive_.need_header(t, *tp);
-            auto b = archive_.body(t, *tp);
-            if (!b) throw bt::sidechain::ArchiveError("no body for block " + bt::hex_encode(*tp));
+            // Theirs (net_task.rs:943) calls state.disconnect_tip only (no 2WPD, no mempool).
+            // A mainchain reorg never gets here: blocks leave the tip set only when their body
+            // is deleted as invalid, which never happens to a state block.
+            // Ours disconnects properly (2WPD + mempool): their path is unreachable for them,
+            // ours is reached only after --bt-rebuild-side-tips or invalidate_block.
             LOG_WARN("state tip %s is not a side tip; disconnecting it", bt::hex_encode(*tp).c_str());
-            state_.disconnect_tip(t, h, *b);
+            disconnect_tip_(t);
             changed = true;
         }
         best = side_tips_.best(t);
+        if (best && archive_.invalid(t, best->first)) best.reset(); // policy (cannot happen: removed at invalidation)
         t.commit();
     } catch (const std::exception& e) {
         LOG_ERROR("handle mainchain block event: %s", e.what());
@@ -682,6 +691,33 @@ void Node::delete_body_(Txn& t, const Hash32& h)
 {
     archive_.delete_body(t, h);
     side_tips_delete_body(t, archive_, side_tips_, h);
+}
+
+// Theirs stores any body whose header hash matches (net_task.rs:576-588) and finds a wrong
+// one only at connect (then drops the peer). Ours, stricter and consensus-neutral (such a body
+// fails connect anyway): an oversized body is refused, and a body whose parent is our tip is
+// fully prevalidated (merkle root incl. the 1000-tx switch, fees, authorizations). The body
+// of any other block cannot be checked against its header without that block's parent state
+// (the merkle root commits to fees); it is checked at connect, deleted if wrong (re-requested
+// from another peer), and the peer that sent the tip is banned. Empty = fine.
+std::string Node::check_peer_body_(const Txn& t, const Hash32& want, const Body& b)
+{
+    if (borsh_bytes(b).size() > Body::MAX_SIZE) return "BodyTooLarge";
+    auto hd = archive_.header(t, want);
+    if (!hd) return {}; // invalidated meanwhile: not stored (put_body needs the header), no ban
+    if (hd->prev_side_hash != state_.tip(t)) return {};
+    try {
+        state_.prevalidate(t, *hd, b);
+    } catch (const StateError& e) {
+        return e.what();
+    }
+    return {};
+}
+
+std::string Node::check_peer_body(const Hash32& want, const Body& b)
+{
+    LOCKED;
+    return check_peer_body_(t, want, b);
 }
 
 void Node::receive_block(const Header& h, const Body& b)
@@ -770,12 +806,14 @@ void Node::publish_block(const Hash32& h, uint32_t height)
 }
 
 // net_task.rs:227-430
-bool Node::reorg_to_tip(const TipRef& new_tip)
+bool Node::reorg_to_tip(const TipRef& new_tip, bool* invalid_body)
 {
     std::vector<std::pair<Hash32, uint32_t>> published;
     {
         std::lock_guard<std::recursive_mutex> l(mu_);
         Txn t(*store_);
+        // policy: never to an operator-invalidated block or a descendant of one
+        if (archive_.invalid(t, new_tip.block_hash)) return false;
         auto tip_hash = state_.tip(t);
         auto tip_height = state_.height(t);
         std::optional<TipRef> tip;
@@ -791,6 +829,7 @@ bool Node::reorg_to_tip(const TipRef& new_tip)
         {
             std::optional<Hash32> cur = new_tip.block_hash;
             while (cur && cur != common) {
+                if (archive_.invalid(t, *cur)) return false;
                 auto h = archive_.header(t, *cur);
                 auto b = archive_.body(t, *cur);
                 if (!h || !b) return false;
@@ -829,6 +868,7 @@ bool Node::reorg_to_tip(const TipRef& new_tip)
                 Txn dt(*store_);
                 delete_body_(dt, h.hash());
                 dt.commit();
+                if (invalid_body) *invalid_body = true;
                 return false;
             }
             published.emplace_back(h.hash(), (common_height ? *common_height + 1 : 0) + idx);
@@ -1210,7 +1250,10 @@ void Node::request_bodies(bt::quic::ConnId c, const TipInfo& target)
                 LOCKED;
                 ready = side_tips_tip_ready(t, archive_, side_tips_, nt); // NewTipReady
             }
-            if (ready) reorg_to_tip(nt);
+            bool invalid = false;
+            if (ready) reorg_to_tip(nt, &invalid);
+            // theirs drops the peer whose block fails to connect (net_task.rs:1257-1272)
+            if (invalid) ban(c, "InvalidBlock");
         } catch (const std::exception& e) {
             LOG_WARN("reorg failed: %s", e.what());
         }
@@ -1224,16 +1267,25 @@ void Node::request_bodies(bt::quic::ConnId c, const TipInfo& target)
         q.block_hash = missing[i];
         Hash32 want = missing[i];
         send_request(c, q, bt::sidechain::BLOCK_RESPONSE_LIMIT, [this, c, target, want, remaining](std::optional<P2P::Response> r) {
+            std::string why;
             if (r && r->kind == P2P::Response::Block && r->header.hash() == want) {
                 LOCKED;
                 if (!archive_.body(t, want)) {
-                    try {
-                        put_body_(t, want, r->body);
-                        t.commit();
-                    } catch (const std::exception& e) {
-                        LOG_WARN("cannot store body %s: %s", bt::hex_encode(want).c_str(), e.what());
+                    why = check_peer_body_(t, want, r->body);
+                    if (why.empty()) {
+                        try {
+                            put_body_(t, want, r->body);
+                            t.commit();
+                        } catch (const std::exception& e) {
+                            LOG_WARN("cannot store body %s: %s", bt::hex_encode(want).c_str(), e.what());
+                        }
                     }
                 }
+            }
+            if (!why.empty()) { // outside the node lock
+                LOG_WARN("invalid body for %s from peer: %s", bt::hex_encode(want).c_str(), why.c_str());
+                ban(c, "InvalidBody: " + why);
+                return;
             }
             if (--*remaining == 0) request_bodies(c, target);
         });

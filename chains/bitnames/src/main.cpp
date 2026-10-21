@@ -83,6 +83,7 @@ static void usage()
         "      --bt-rpc-allowed-host <HOST>               Extra Host header name accepted by the RPC server\n"
         "      --bt-rpc-allow-external                    Allow binding the unauthenticated RPC to a non-loopback address\n"
         "      --bt-no-seeds                              Do not dial the built-in seed peers\n"
+        "      --bt-rebuild-side-tips                     Rebuild the side-tips index from the mainchain at start\n"
         "      --bt-no-p2p                                Disable P2P networking\n"
         "      --bt-no-zmq                                Do not bind the ZMQ publisher\n",
         default_datadir().c_str(), VERSION);
@@ -219,6 +220,8 @@ int main(int argc, char** argv)
             rpc_opts.allow_external = true;
         } else if (a == "--bt-no-seeds") {
             cfg.use_seeds = false;
+        } else if (a == "--bt-rebuild-side-tips") {
+            cfg.rebuild_side_tips = true;
         } else if (a == "--bt-no-p2p") {
             cfg.p2p = false;
         } else if (a == "--bt-no-zmq") {
