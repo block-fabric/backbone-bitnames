@@ -4,7 +4,8 @@ add_library(bitnames_core STATIC
   src/chain.cpp
   src/state.cpp
   src/json.cpp
-  src/fixture.cpp)
+  src/fixture.cpp
+  src/side_tips.cpp)
 target_include_directories(bitnames_core PUBLIC include)
 target_link_libraries(bitnames_core PUBLIC bt_core)
 

@@ -586,44 +586,110 @@ void Node::mainchain_loop()
             auto tr = enforcer_->get_chain_tip();
             if (bt::enforcer::ok(tr)) {
                 Hash32 mt = bt::enforcer::val(tr).block_hash;
-                if (mt != last_tip && request_mainchain_ancestor_infos(mt)) {
-                    sync_to_mainchain_tip(mt);
-                    last_tip = mt;
-                }
+                // a failed side-tips sync is retried on the next poll, as their mainchain
+                // task restarts after 5 s and fails again the same way
+                if (mt != last_tip && request_mainchain_ancestor_infos(mt) && sync_to_mainchain_tip(mt)) last_tip = mt;
             }
         }
         for (int i = 0; i < 20 && running_; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
-// A state tip no longer BMM-verified on the active mainchain is disconnected with its 2WPD.
-void Node::sync_to_mainchain_tip(const Hash32& main_tip)
+// mainchain_task.rs sync_side_tips_to_tip + handle_block_event, then net_task.rs
+// handle_mainchain_block_event. A mainchain reorg does NOT disconnect sidechain blocks whose
+// BMM block left the active chain (quirk reproduced on purpose, side_tips.h): the state tip
+// moves only when reorg_to_tip's better_tip prefers the best ordered side tip, or a peer's.
+bool Node::sync_to_mainchain_tip(const Hash32& main_tip)
 {
-    bool changed = false;
+    size_t events = 0;
     {
         LOCKED;
         t.put(T_MAIN_TIP, Bytes{0}, main_tip.span());
-        while (auto tp = state_.tip(t)) {
-            bool ok = false;
-            for (auto& [m, r] : archive_.bmm_results(t, *tp))
-                if (r == BmmResult::Verified && archive_.is_main_descendant(t, m, main_tip)) {
-                    ok = true;
-                    break;
-                }
-            if (ok) break;
-            LOG_WARN("tip %s no longer BMM-verified on the active mainchain; disconnecting", bt::hex_encode(*tp).c_str());
-            try {
-                disconnect_tip_(t);
-            } catch (const StateError& e) {
-                LOG_ERROR("cannot disconnect tip: %s", e.what());
-                break;
+        try {
+            events = sync_side_tips(t, archive_, side_tips_, main_tip, [this](uint32_t done, uint32_t total, uint32_t tip_height) {
+                std::lock_guard<std::mutex> sl(sync_mu_);
+                sync_ = done == total ? SyncProgress{} : SyncProgress{SyncProgress::StateSync, done, total, tip_height};
+            });
+        } catch (const std::exception& e) {
+            {
+                std::lock_guard<std::mutex> sl(sync_mu_);
+                sync_ = SyncProgress{};
             }
-            changed = true;
+            LOG_ERROR("Mainchain task error: failed to sync side tips to %s: %s", bt::hex_encode_rev(main_tip.span()).c_str(), e.what());
+            return false;
         }
         t.commit();
     }
-    refresh_cache();
-    if (changed && on_tip_changed) on_tip_changed();
+    if (events) handle_mainchain_block_event();
+    return true;
+}
+
+// net_task.rs:928-980
+void Node::handle_mainchain_block_event()
+{
+    std::optional<std::pair<Hash32, SideTipInfo>> best;
+    bool changed = false;
+    try {
+        LOCKED;
+        while (auto tp = state_.tip(t)) {
+            if (side_tips_.contains(t, *tp)) break;
+            // Their state.disconnect_tip only: no 2WPD disconnect and no mempool re-add
+            // (net_task.rs:943). A mainchain reorg never gets here: blocks leave the tip set
+            // only when their body is deleted as invalid, which never happens to a state block.
+            Header h = archive_.need_header(t, *tp);
+            auto b = archive_.body(t, *tp);
+            if (!b) throw bt::sidechain::ArchiveError("no body for block " + bt::hex_encode(*tp));
+            LOG_WARN("state tip %s is not a side tip; disconnecting it", bt::hex_encode(*tp).c_str());
+            state_.disconnect_tip(t, h, *b);
+            changed = true;
+        }
+        best = side_tips_.best(t);
+        t.commit();
+    } catch (const std::exception& e) {
+        LOG_ERROR("handle mainchain block event: %s", e.what());
+        return;
+    }
+    if (changed) {
+        refresh_cache();
+        if (on_tip_changed) on_tip_changed();
+    }
+    if (!best) return;
+    try {
+        reorg_to_tip(TipRef{best->first, best->second.main_block_hash});
+    } catch (const std::exception& e) {
+        LOG_WARN("rejecting an invalid side tip %s: %s", bt::hex_encode(best->first).c_str(), e.what());
+    }
+}
+
+/** submit_block: their mainchain task has normally handled the BMM block's ConnectBlock event
+ *  before the miner submits, so the side tips first follow the enforcer's tip. */
+bool Node::catch_up_mainchain()
+{
+    if (!enforcer_) return false;
+    auto tr = enforcer_->get_chain_tip();
+    if (!bt::enforcer::ok(tr)) return false;
+    Hash32 mt = bt::enforcer::val(tr).block_hash;
+    return request_mainchain_ancestor_infos(mt) && sync_to_mainchain_tip(mt);
+}
+
+void Node::put_body_(Txn& t, const Hash32& h, const Body& b)
+{
+    archive_.put_body(t, h, b);
+    side_tips_put_body(t, archive_, side_tips_, h);
+}
+
+void Node::delete_body_(Txn& t, const Hash32& h)
+{
+    archive_.delete_body(t, h);
+    side_tips_delete_body(t, archive_, side_tips_, h);
+}
+
+void Node::receive_block(const Header& h, const Body& b)
+{
+    LOCKED;
+    if (!archive_.header(t, h.hash())) archive_.put_header(t, h);
+    if (!archive_.body(t, h.hash())) put_body_(t, h.hash(), b);
+    t.commit();
 }
 
 // ------------------------------------------------------------------ connect / reorg (net_task.rs)
@@ -648,7 +714,7 @@ void Node::connect_tip_(Txn& t, const Header& h, const Body& b, const TwoWayPegD
     state_.connect_prevalidated(t, h, b, pre);
     state_.connect_2wpd(t, d);
     archive_.put_header(t, h);
-    archive_.put_body(t, bh, b);
+    put_body_(t, bh, b);
     for (auto& tx : b.transactions) mempool_delete(tx.txid());
 }
 
@@ -761,7 +827,7 @@ bool Node::reorg_to_tip(const TipRef& new_tip)
             } catch (const StateError& e) {
                 LOG_WARN("block %s rejected: %s%s", bt::hex_encode(h.hash()).c_str(), e.what(), e.panic ? " (their node would panic)" : "");
                 Txn dt(*store_);
-                archive_.delete_body(dt, h.hash());
+                delete_body_(dt, h.hash());
                 dt.commit();
                 return false;
             }
@@ -793,6 +859,7 @@ bool Node::submit_block(const Hash32& main_block_hash, const Header& h, const Bo
         }
     }
     if (!request_mainchain_ancestor_infos(main_block_hash)) return false;
+    catch_up_mainchain();
     {
         std::lock_guard<std::recursive_mutex> l(mu_);
         {
@@ -817,11 +884,16 @@ bool Node::submit_block(const Hash32& main_block_hash, const Header& h, const Bo
         }
         if (missing == std::vector<Hash32>{bh}) {
             Txn w(*store_);
-            archive_.put_body(w, bh, b);
+            put_body_(w, bh, b);
             w.commit();
         }
     }
-    if (!reorg_to_tip(TipRef{bh, main_block_hash})) {
+    bool ready;
+    {
+        LOCKED;
+        ready = side_tips_tip_ready(t, archive_, side_tips_, TipRef{bh, main_block_hash});
+    }
+    if (!ready || !reorg_to_tip(TipRef{bh, main_block_hash})) {
         LOG_WARN("Not ready to reorg to %s", bt::hex_encode(bh).c_str());
         return false;
     }
@@ -1073,6 +1145,9 @@ void Node::handle_peer_state(bt::quic::ConnId c, const PeerState& ps)
         ban(c, "BmmVerificationFailed");
         return;
     }
+    // peer/task.rs:57-84: a peer tip whose main block is not on our side tips' mainchain is
+    // ignored (no ban)
+    if (!side_tips_peer_tip_relevant(t, archive_, side_tips_, pt.tip.main_block_hash)) return;
     if (archive_.header(t, pt.tip.block_hash)) {
         request_bodies(c, pt);
         return;
@@ -1129,7 +1204,13 @@ void Node::request_bodies(bt::quic::ConnId c, const TipInfo& target)
     }
     if (missing.empty()) {
         try {
-            reorg_to_tip(TipRef{target.tip.block_hash, target.tip.main_block_hash});
+            TipRef nt{target.tip.block_hash, target.tip.main_block_hash};
+            bool ready;
+            {
+                LOCKED;
+                ready = side_tips_tip_ready(t, archive_, side_tips_, nt); // NewTipReady
+            }
+            if (ready) reorg_to_tip(nt);
         } catch (const std::exception& e) {
             LOG_WARN("reorg failed: %s", e.what());
         }
@@ -1146,8 +1227,12 @@ void Node::request_bodies(bt::quic::ConnId c, const TipInfo& target)
             if (r && r->kind == P2P::Response::Block && r->header.hash() == want) {
                 LOCKED;
                 if (!archive_.body(t, want)) {
-                    archive_.put_body(t, want, r->body);
-                    t.commit();
+                    try {
+                        put_body_(t, want, r->body);
+                        t.commit();
+                    } catch (const std::exception& e) {
+                        LOG_WARN("cannot store body %s: %s", bt::hex_encode(want).c_str(), e.what());
+                    }
                 }
             }
             if (--*remaining == 0) request_bodies(c, target);

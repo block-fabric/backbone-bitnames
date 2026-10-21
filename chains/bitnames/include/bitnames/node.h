@@ -8,6 +8,7 @@
 #pragma once
 
 #include <bitnames/chain.h>
+#include <bitnames/side_tips.h>
 #include <bitnames/state.h>
 
 #include <bt/enforcer.h>
@@ -105,12 +106,22 @@ public:
     bool connect_peer(const std::string& hostport, std::string& err);
     bool forget_peer(const std::string& hostport);
     bool request_mainchain_ancestor_infos(const Hash32& main);
+    /** Move the side tips to main_tip (mainchain_task.rs sync_side_tips_to_tip) and, when
+     *  that (dis)connected mainchain blocks, run net_task.rs handle_mainchain_block_event.
+     *  False when the side tips cannot follow (their mainchain task fails the same way and
+     *  retries); the mainchain headers must be stored. */
+    bool sync_to_mainchain_tip(const Hash32& main_tip);
+    /** Tests: run the chain logic on a store without starting the node's threads. */
+    void attach_store(std::unique_ptr<bt::kv::Store> s) { store_ = std::move(s); }
+    /** Store a header and body as a peer's GetBlock answer does, without reorging. */
+    void receive_block(const Header& h, const Body& b);
     /** node/mod.rs get_transactions(n): mempool in txid order, revalidated, conflicts dropped. */
     std::pair<std::vector<std::pair<AuthorizedTransaction, std::vector<FilledOutput>>>, uint64_t> mempool_transactions(size_t n);
 
     bt::enforcer::Client& enforcer() { return *enforcer_; }
     Archive& archive() { return archive_; }
     State& state() { return state_; }
+    const SideTips& side_tips() const { return side_tips_; }
     std::recursive_mutex& lock() { return mu_; }
     bt::kv::Store& store() { return *store_; }
     const NodeConfig& config() const { return cfg_; }
@@ -123,6 +134,7 @@ private:
     std::unique_ptr<bt::kv::Store> store_;
     State state_;
     Archive archive_;
+    SideTips side_tips_;
     std::unique_ptr<bt::enforcer::Client> enforcer_;
     std::unique_ptr<bt::zmq::Publisher> zmq_;
     std::recursive_mutex mu_;
@@ -141,8 +153,11 @@ private:
     void mempool_put(const AuthorizedTransaction& tx);
     void mempool_delete(const Hash32& txid);
     bool confirmed_on_active_chain(const bt::kv::Txn& t, const Hash32& txid);
+    void put_body_(bt::kv::Txn& t, const Hash32& h, const Body& b);
+    void delete_body_(bt::kv::Txn& t, const Hash32& h);
+    void handle_mainchain_block_event();
+    bool catch_up_mainchain();
     void mainchain_loop();
-    void sync_to_mainchain_tip(const Hash32& main_tip);
     void publish_block(const Hash32& h, uint32_t height);
 
     // P2P

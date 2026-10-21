@@ -57,6 +57,17 @@ one generator drives both; `get_block_index` is the best per-block hook.
 14. **Reorgs**: sidechain reorg via `invalidate_block`; mainchain reorgs over a side tip with
     and without deposits; equal-height competing tips; reorg across a replayed zero-input tx
     (their node cannot disconnect it; ours must refuse identically and keep the tip).
+    **Quirk reproduced on purpose** (bitnames.md quirk 9): a mainchain reorg that removes the
+    BMM blocks of the last sidechain blocks keeps those blocks on both nodes (lab 2026-10-21:
+    theirs kept 2, ours then dropped them: fixed). Check after each step, both nodes: tip,
+    height, `get_best_mainchain_block_hash`, UTXOs: (a) reorg removing the BMM blocks of the
+    last 2 blocks, no commitments on the new branch: tip unchanged; (b) then mine on either
+    node: both templates build an empty block on the last block whose prev_main survived and
+    both switch to it; (c) a competing block committed on the new branch at lower height:
+    both keep the old tip until it is beaten by `better_tip`; (d) mine on a kept block: BMM
+    fails on both; (e) reorg back and away again over a kept block's BMM block, and a reorg of
+    a commitment to a block never relayed: both mainchain syncs halt with `missing sidechain
+    tip` (theirs logs `Mainchain task error`) and keep their tips.
 15. **Mempool/relay**: `submit_transaction`, `broadcast_transaction`,
     `rebroadcast_transaction`, `create_transfer(_many)`, `create_withdrawal`,
     `reserve_bitname`, `register_bitname` on either side, PushTransaction answers

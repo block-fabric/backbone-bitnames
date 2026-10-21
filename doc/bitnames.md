@@ -85,6 +85,44 @@ plain-bitnames 0.17.2 has no betanet network and different hashes; it is not the
 8. Shared core rules as Thunder: no intra-block spends, unclaimed fees burned, bundle builder
    `break`, pending bundle never expires, unknown bundle confirmed at height > 0 halts,
    `deposit_blocks` little-endian keys, fork choice `better_tip`, first genesis sticks.
+9. **Mainchain reorgs keep sidechain blocks whose BMM block was reorged away** (lab
+   2026-10-21: their node kept 2 such blocks, 36 vs our 34, and the states diverged; tests
+   `tests/test_bitnames_side_tips.cpp`, code `side_tips.{h,cpp}` + `Node::sync_to_mainchain_tip`).
+   Their rule (plain-bitnames v0.18.2 a38200d), ported table for table:
+   * The "side tips" index has a tip set (`sidechain_tips`), the same tips ordered by
+     (height, total work of the recording main block, main hash) (`ordered_sidechain_tips`),
+     and its own mainchain tip. A block enters both when its main block is connected with a
+     Verified BMM commitment, its body is stored and its parent is in the set
+     (`mainchain_task.rs:355-391`), or when its body arrives later and a Verified BMM block is
+     on that mainchain (`archive/mod.rs:672-730`, with its waiting descendants). It keeps the
+     first main block it was recorded at.
+   * Disconnecting a mainchain block (`side_tips/mod.rs:295-359`) removes its committed block
+     **only from the ordered tips**, and only when it was recorded at that main block; the
+     block stays in the tip set. Reconnecting a commitment to a block already in the set does
+     not re-order it (`:214-233`).
+   * After every mainchain event (`net_task.rs:928-980`) the node disconnects state tips that
+     are **not in the tip set** (never the case after a mainchain reorg; and then without the
+     2WPD and the mempool, `:943`), then `reorg_to_tip(best ordered tip)`, which moves only when
+     `better_tip` prefers it. The state tip is compared with its best Verified BMM block, stale
+     or not (`get_best_main_verification`).
+   * Peer tips and `submit_block` tips are reorged to only when they are in the tip set and
+     their main block is on the side-tips mainchain (`net_task.rs:1215-1245`); peer tips on
+     another mainchain branch are ignored without a ban (`peer/task.rs:57-84`).
+   Outcomes: the kept blocks stay until another tip wins `better_tip` — normally the next
+   block mined on the new mainchain (their template mines an empty block on the last block
+   whose prev_main is still an ancestor, see `build_block_template`); a competing block
+   already committed on the new branch does not displace them while it is lower with no more
+   work; a child of a kept block fails BMM on the new mainchain. **Halts**: disconnecting a
+   main block whose commitment is not in the tip set (a block whose body never arrived, a
+   failed BMM) or is no longer ordered (the block's main block disconnected, reconnected and
+   disconnected again) fails with `missing sidechain tip`; their mainchain task fails the same
+   way on every retry and the side tips stay at the old mainchain tip (peers on the new branch
+   ignored). Ours logs `Mainchain task error` and retries on every poll, as theirs.
+   Thunder: thunder-rust 244e20f has the same side-tips code (archive, `side_tips`,
+   `sync_side_tips_to_tip` identical), but its live `DisconnectBlock` handler passes the block
+   itself as the parent (`mainchain_task.rs:442-447`) and the app exits; after a restart the
+   startup sync applies this same rule. backbone-thunder keeps its "disconnect a tip no longer
+   BMM-verified" rule (unchanged, decision pending).
 Where their node panics (assert/expect) ours rejects (`StateError::panic`).
 
 ## Kept (consensus-neutral) and deviations
@@ -102,8 +140,12 @@ Where their node panics (assert/expect) ours rejects (`StateError::panic`).
   transaction.
 * `openapi_schema` lists the methods instead of utoipa's full schema; `get_block` of an
   unknown block is an error (theirs panics the handler); no GUI.
-* Mainchain: we poll `GetChainTip` (2 s); peer sync is the simplified decision table of
-  backbone-thunder (same outcome, traffic may differ); `side_tips` is not ported.
+* Mainchain: we poll `GetChainTip` (2 s) and move the side tips to it in one step (their
+  startup sync; live, their events come one block at a time); `submit_block` first syncs the
+  side tips to the enforcer's tip (their task has normally handled the BMM block's event by
+  then). Peer sync is the simplified decision table of backbone-thunder plus their side-tips
+  gates (same outcome, traffic may differ). A datadir from before the side-tips port rebuilds
+  the index from the mainchain on first start (one pass over all mainchain blocks).
 
 ## Remaining
 
