@@ -800,7 +800,8 @@ struct AppLayer::Impl {
         o.pushKV("balance", n64(balance));
         o.pushKV("utxos", utxos);
         o.pushKV("spent", stxos);
-        o.pushKV("depositAddress", a.format_for_deposit());
+        // What a deposit from eCash names: the bare address, which every BitNames node credits (some older ones nothing else).
+        o.pushKV("depositAddress", a.to_base58());
         return o;
     }
 
@@ -1267,7 +1268,8 @@ bool AppLayer::start(std::string& err)
         const Address a{m.wallet.get_new_address()};
         UniValue o{UniValue::VOBJ};
         o.pushKV("address", a.to_base58());
-        o.pushKV("depositAddress", a.format_for_deposit());
+        // What a deposit from eCash names: the bare address, which every BitNames node credits (some older ones nothing else).
+        o.pushKV("depositAddress", a.to_base58());
         return o;
     };
     P["dropin.newAddress"] = {"get_new_address"};
@@ -1284,7 +1286,7 @@ bool AppLayer::start(std::string& err)
         for (const Address& a : m.wallet.addresses()) {
             UniValue r{UniValue::VOBJ};
             r.pushKV("address", a.to_base58());
-            r.pushKV("depositAddress", a.format_for_deposit());
+            r.pushKV("depositAddress", a.to_base58());
             r.pushKV("balance", n64(got[a].first));
             r.pushKV("received", n64(got[a].second));
             out.push_back(r);

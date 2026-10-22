@@ -261,6 +261,12 @@ TEST(appui_wallet_ownership_only_for_a_wallet_reader)
     const UniValue reader{host_call(layer, "app", "dropin.checkAddress", p)["result"]};
     CHECK(reader["valid"].isTrue());
     CHECK(reader["mine"].isTrue());
+    // The deposit address the pages show is the bare address, which every depositing wallet writes as it is.
+    const UniValue na{host_call(layer, "__cookie__", "dropin.newAddress", "{}")["result"]};
+    CHECK_EQ(na["depositAddress"].get_str(), na["address"].get_str());
+    const UniValue all{host_call(layer, "__cookie__", "dropin.addresses", "{}")["result"]};
+    CHECK(all.size() >= 1);
+    for (const UniValue& r : all.getValues()) CHECK_EQ(r["depositAddress"].get_str(), r["address"].get_str());
     const UniValue chain_only{host_call(layer, "chainonly", "dropin.checkAddress", p)["result"]};
     CHECK(chain_only["valid"].isTrue());
     CHECK(!chain_only.exists("mine"));
