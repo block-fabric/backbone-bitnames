@@ -11,6 +11,9 @@
 #include <bitnames/side_tips.h>
 #include <bitnames/state.h>
 
+// The P2P hardening shared with the sidechain template (rate_key, ban_active, HeadersBudgets).
+#include <bt/sidechain/node.h>
+
 #include <bt/enforcer.h>
 #include <bt/kv.h>
 #include <bt/quic.h>
@@ -172,12 +175,15 @@ private:
         std::string dial;
         bool connected = false, inbound = false;
         std::optional<bt::sidechain::PeerState> state;
+        bool bodies_chain = false; // a request_bodies chain is running for this peer
+        int64_t last_sync_try = 0; // when its tip was last looked at (handle_peer_state)
     };
     std::unique_ptr<bt::quic::Endpoint> ep_;
     std::mutex peers_mu_;
     std::map<bt::quic::ConnId, Peer> peers_;
     std::map<std::string, int64_t> dial_targets_;
-    std::map<std::string, int64_t> banned_;
+    std::map<std::string, int64_t> banned_;          // bt::sidechain::rate_key(ip) -> until
+    bt::sidechain::HeadersBudgets headers_budgets_; // GetHeaders per remote IP, under peers_mu_
     std::array<uint8_t, 4> magic_{};
     // The P2P loop reads only these (never the node lock or the store), so a long store
     // write cannot delay heartbeats past their 5 s timeout (which gets us banned).
@@ -202,6 +208,8 @@ private:
     void handle_peer_state(bt::quic::ConnId c, const bt::sidechain::PeerState& ps);
     void on_headers(bt::quic::ConnId c, const bt::sidechain::TipInfo& target, const std::vector<Header>& hs);
     void request_bodies(bt::quic::ConnId c, const bt::sidechain::TipInfo& target);
+    void start_body_chain(bt::quic::ConnId c, const bt::sidechain::TipInfo& target);
+    void end_body_chain(bt::quic::ConnId c);
     void ban(bt::quic::ConnId c, const std::string& why);
     std::optional<bt::sidechain::TipInfo> our_tip_info();
     size_t relay_tx(const AuthorizedTransaction& tx, std::optional<bt::quic::ConnId> except);

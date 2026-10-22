@@ -61,7 +61,14 @@ bool Node::start(std::string& err)
     if (cfg_.p2p) {
         bt::quic::Callbacks cb;
         cb.on_connected = [this](bt::quic::ConnId c, const bt::quic::SockAddr& a, bool inbound) {
-            std::lock_guard<std::mutex> l(peers_mu_);
+            std::unique_lock<std::mutex> l(peers_mu_);
+            // Bans hold for inbound connections too (review 2026-10-22: outbound dials only before).
+            if (bt::sidechain::ban_active(banned_, a.ip, now_s())) {
+                l.unlock();
+                LOG_INFO("refusing banned peer %s", a.to_string().c_str());
+                ep_->close(c, "banned"); // only queues the drop on the I/O loop
+                return;
+            }
             auto& p = peers_[c];
             p.conn = c;
             p.addr = a;
@@ -1051,7 +1058,7 @@ void Node::ban(bt::quic::ConnId c, const std::string& why)
         auto it = peers_.find(c);
         if (it == peers_.end()) return;
         ip = it->second.addr.ip;
-        banned_[ip] = now_s() + 3600;
+        banned_[bt::sidechain::rate_key(ip)] = now_s() + 3600;
     }
     LOG_WARN("banning peer %s: %s", ip.c_str(), why.c_str());
     ep_->close(c, "banned: " + why);
@@ -1060,6 +1067,21 @@ void Node::ban(bt::quic::ConnId c, const std::string& why)
 // Requests from peers (peer/task.rs)
 void Node::on_request(bt::quic::ConnId c, int64_t stream, Bytes payload)
 {
+    std::string peer_ip;
+    {
+        // Fail closed: a connection not known as connected, or a banned one, is closed.
+        std::lock_guard<std::mutex> l(peers_mu_);
+        auto it = peers_.find(c);
+        if (it == peers_.end() || !it->second.connected) {
+            ep_->close(c, "unknown connection");
+            return;
+        }
+        peer_ip = it->second.addr.ip;
+        if (bt::sidechain::ban_active(banned_, peer_ip, now_s())) {
+            ep_->close(c, "banned");
+            return;
+        }
+    }
     if (payload.size() < 4 || !std::equal(magic_.begin(), magic_.end(), payload.begin())) {
         ep_->close(c, "bad magic");
         return;
@@ -1082,11 +1104,21 @@ void Node::on_request(bt::quic::ConnId c, int64_t stream, Bytes payload)
         bool changed;
         {
             std::lock_guard<std::mutex> l(peers_mu_);
-            auto& p = peers_[c];
+            auto it = peers_.find(c);
+            if (it == peers_.end()) return; // gone meanwhile: never create entries here
+            auto& p = it->second;
             Writer a, b;
             if (p.state) bt::sidechain::encode_peer_state(a, *p.state);
             bt::sidechain::encode_peer_state(b, q.heartbeat);
             changed = !p.state || a.buf != b.buf;
+            // An unchanged peer tip that is not ours is looked at again every 5 s: the first look can come before
+            // our side tips have the peer's mainchain block (as the sidechain template's node).
+            int64_t now = now_s();
+            if (!changed && q.heartbeat.tip_info && now - p.last_sync_try >= 5) {
+                std::lock_guard<std::mutex> cl(cache_mu_);
+                changed = !cached_tip_info_ || cached_tip_info_->tip.block_hash != q.heartbeat.tip_info->tip.block_hash;
+            }
+            if (changed) p.last_sync_try = now;
             p.state = q.heartbeat;
         }
         if (changed) post_job([this, c, ps = q.heartbeat] { handle_peer_state(c, ps); });
@@ -1109,13 +1141,27 @@ void Node::on_request(bt::quic::ConnId c, int64_t stream, Bytes payload)
         return;
     }
     case P2P::Request::GetHeaders: {
+        {
+            // At most GETHEADERS_PER_MINUTE per remote IP, kept across reconnects (review 2026-10-22): one small
+            // request makes us walk and send the whole chain. Theirs asks about once per new peer tip.
+            std::lock_guard<std::mutex> l(peers_mu_);
+            if (!headers_budgets_.take(peer_ip, now_s())) {
+                LOG_WARN("peer %s: too many GetHeaders requests", peer_ip.c_str());
+                ep_->close(c, "too many GetHeaders requests");
+                return;
+            }
+        }
         P2P::Response r;
         LOCKED;
         if (archive_.header(t, q.end)) {
             std::set<Hash32> start(q.start.begin(), q.start.end());
             r.kind = P2P::Response::Headers;
             std::optional<Hash32> cur = q.end;
-            while (cur && !start.count(*cur)) {
+            // Their requester needs the whole answer (net_task.rs), so it is not cut short; the walk is bounded by
+            // the height of `end` (a chain is no longer; guards a corrupt archive).
+            auto end_height = archive_.height(t, q.end);
+            const uint64_t cap = uint64_t(end_height ? *end_height : 0) + 1;
+            while (cur && !start.count(*cur) && r.headers.size() < cap) {
                 auto h = archive_.header(t, *cur);
                 if (!h) break;
                 r.headers.push_back(*h);
@@ -1188,7 +1234,7 @@ void Node::handle_peer_state(bt::quic::ConnId c, const PeerState& ps)
     // ignored (no ban)
     if (!side_tips_peer_tip_relevant(t, archive_, side_tips_, pt.tip.main_block_hash)) return;
     if (archive_.header(t, pt.tip.block_hash)) {
-        request_bodies(c, pt);
+        start_body_chain(c, pt);
         return;
     }
     P2P::Request q;
@@ -1228,9 +1274,31 @@ void Node::on_headers(bt::quic::ConnId c, const TipInfo& target, const std::vect
             return;
         }
     }
+    start_body_chain(c, target);
+}
+
+// At most one request_bodies chain per peer (review 2026-10-22).
+void Node::start_body_chain(bt::quic::ConnId c, const TipInfo& target)
+{
+    {
+        std::lock_guard<std::mutex> l(peers_mu_);
+        auto it = peers_.find(c);
+        if (it == peers_.end() || it->second.bodies_chain) return;
+        it->second.bodies_chain = true;
+    }
     request_bodies(c, target);
 }
 
+void Node::end_body_chain(bt::quic::ConnId c)
+{
+    std::lock_guard<std::mutex> l(peers_mu_);
+    auto it = peers_.find(c);
+    if (it != peers_.end()) it->second.bodies_chain = false;
+}
+
+// The bodies missing below the peer's tip, 100 a round, then the reorg. Only bodies stored count as progress: a round
+// with none (NoBlock, a wrong block, timeouts) ends the chain and closes the connection (review 2026-10-22: a peer
+// could keep us looping).
 void Node::request_bodies(bt::quic::ConnId c, const TipInfo& target)
 {
     std::vector<Hash32> missing;
@@ -1242,6 +1310,7 @@ void Node::request_bodies(bt::quic::ConnId c, const TipInfo& target)
         missing = archive_.missing_bodies(t, target.tip.block_hash, common);
     }
     if (missing.empty()) {
+        end_body_chain(c);
         try {
             TipRef nt{target.tip.block_hash, target.tip.main_block_hash};
             bool ready;
@@ -1260,33 +1329,47 @@ void Node::request_bodies(bt::quic::ConnId c, const TipInfo& target)
     }
     size_t n = std::min<size_t>(missing.size(), 100);
     auto remaining = std::make_shared<std::atomic<size_t>>(n);
+    auto stored = std::make_shared<std::atomic<size_t>>(0);
+    auto banned = std::make_shared<std::atomic<bool>>(false);
     for (size_t i = 0; i < n; i++) {
         P2P::Request q;
         q.kind = P2P::Request::GetBlock;
         q.block_hash = missing[i];
         Hash32 want = missing[i];
-        send_request(c, q, bt::sidechain::BLOCK_RESPONSE_LIMIT, [this, c, target, want, remaining](std::optional<P2P::Response> r) {
+        send_request(c, q, bt::sidechain::BLOCK_RESPONSE_LIMIT, [this, c, target, want, remaining, stored, banned](std::optional<P2P::Response> r) {
             std::string why;
             if (r && r->kind == P2P::Response::Block && r->header.hash() == want) {
                 LOCKED;
-                if (!archive_.body(t, want)) {
+                if (archive_.body(t, want)) {
+                    // Another connection of the same peer stored it first: still progress (the next round asks
+                    // only for what is still missing, so this cannot loop).
+                    ++*stored;
+                } else {
                     why = check_peer_body_(t, want, r->body);
                     if (why.empty()) {
                         try {
                             put_body_(t, want, r->body);
                             t.commit();
+                            ++*stored;
                         } catch (const std::exception& e) {
                             LOG_WARN("cannot store body %s: %s", bt::hex_encode(want).c_str(), e.what());
                         }
                     }
                 }
             }
-            if (!why.empty()) { // outside the node lock
+            if (!why.empty() && !banned->exchange(true)) { // outside the node lock
                 LOG_WARN("invalid body for %s from peer: %s", bt::hex_encode(want).c_str(), why.c_str());
                 ban(c, "InvalidBody: " + why);
+            }
+            if (--*remaining != 0) return;
+            if (*banned) return; // the connection is gone with its chain
+            if (*stored == 0) {
+                end_body_chain(c);
+                LOG_INFO("peer: no block body delivered in a round; giving up on its tip");
+                ep_->close(c, "no block bodies delivered");
                 return;
             }
-            if (--*remaining == 0) request_bodies(c, target);
+            request_bodies(c, target);
         });
     }
 }
@@ -1328,7 +1411,7 @@ void Node::net_loop()
                     break;
                 }
             std::lock_guard<std::mutex> l(peers_mu_);
-            if (!a || banned_.count(a->ip)) {
+            if (!a || bt::sidechain::ban_active(banned_, a->ip, now)) {
                 dial_targets_[hp] = now + 60;
                 continue;
             }
