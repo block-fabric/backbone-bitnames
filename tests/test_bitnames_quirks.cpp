@@ -471,3 +471,70 @@ TEST(quirk_registration_requires_matching_reservation)
     }
     CHECK(rejected);
 }
+
+TEST(duplicate_input_refused_by_block_and_mempool)
+{
+    // A transaction that spends one outpoint twice (worth 1000, paying 1900: coins made from nothing if let in).
+    // lib/state/block.rs validate: a block with it is refused (the sorted input keys, UtxoDoubleSpent, after the
+    // transactions are filled and before their fees); lib/mempool.rs put: refused at the outpoint's second time.
+    Chain c;
+    auto k = key(41);
+    c.add(Body{}, deposit(addr_of(k), 1000, 41));
+    std::optional<OutPoint> dep;
+    {
+        bt::kv::Txn t(c.store);
+        for (auto& [op, o] : c.st.utxos(t))
+            if (o.address == addr_of(k)) dep = op;
+    }
+    REQUIRE(dep.has_value());
+    const auto value_tx{[&](std::vector<OutPoint> ins, uint64_t value) {
+        Transaction t;
+        t.inputs = std::move(ins);
+        Output o;
+        o.address = addr_of(k);
+        o.content.kind = Content::Bitcoin;
+        o.content.value = value;
+        t.outputs.push_back(o);
+        return t;
+    }};
+    const Transaction dup = value_tx({*dep, *dep}, 1900);
+    std::string why;
+    try {
+        c.add(Body::from_authorized({sign(dup, {k, k})}, {}));
+    } catch (const StateError& e) {
+        why = e.what();
+    }
+    CHECK(why == "UtxoDoubleSpent");
+    // The same outpoint in two transactions of one block: UtxoDoubleSpent too.
+    const Transaction a = value_tx({*dep}, 900), b = value_tx({*dep}, 800);
+    why.clear();
+    try {
+        c.add(Body::from_authorized({sign(a, {k}), sign(b, {k})}, {}));
+    } catch (const StateError& e) {
+        why = e.what();
+    }
+    CHECK(why == "UtxoDoubleSpent");
+    {
+        bt::kv::Txn t(c.store);
+        CHECK(c.st.utxo(t, *dep).has_value()); // still unspent
+    }
+
+    // The mempool: twice in one transaction, or already spent by one in it: refused; else let in.
+    std::map<std::array<uint8_t, 37>, Hash32> spent;
+    bool refused = false;
+    try {
+        mempool_check_inputs(spent, dup);
+    } catch (const StateError& e) {
+        refused = std::string(e.what()) == "UtxoDoubleSpent";
+    }
+    CHECK(refused);
+    mempool_check_inputs(spent, a);
+    spent[dep->key()] = a.txid();
+    refused = false;
+    try {
+        mempool_check_inputs(spent, b);
+    } catch (const StateError& e) {
+        refused = std::string(e.what()) == "UtxoDoubleSpent";
+    }
+    CHECK(refused);
+}

@@ -352,8 +352,7 @@ void Node::refresh_cache()
 void Node::mempool_put(const AuthorizedTransaction& tx)
 {
     Hash32 txid = tx.transaction.txid();
-    for (auto& op : tx.transaction.inputs)
-        if (mempool_spent_.count(op.key())) throw StateError("UtxoDoubleSpent");
+    mempool_check_inputs(mempool_spent_, tx.transaction);
     for (auto& op : tx.transaction.inputs) mempool_spent_[op.key()] = txid;
     mempool_[txid] = tx;
     mempool_size_ = mempool_.size();
