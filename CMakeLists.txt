@@ -19,6 +19,17 @@ add_subdirectory(core)
 
 add_subdirectory(chains/bitnames)
 
+# Our app of BitNames (doc/app.md): bitnames-app, the node with our interface; and its pages as a pack for the unified
+# wallet (target bitnames-app-pack). Needs WebKitGTK (Linux) or WebView2 (Windows), npm, and the sidechain template's
+# repository (BT_KIT_DIR) at the commit of app/kit.commit.
+option(BT_BUILD_APP "Build bitnames-app" OFF)
+if(BT_BUILD_APP)
+  include(core/cmake/BtDesktopApp.cmake)
+  bt_desktop_app(bitnames-app STEM bitnames NAME BitNames VERSION ${PROJECT_VERSION}
+                 CHAIN ${CMAKE_SOURCE_DIR}/app/chain MANIFEST ${CMAKE_SOURCE_DIR}/app/manifest.json
+                 KIT_COMMIT_FILE ${CMAKE_SOURCE_DIR}/app/kit.commit MAIN ${CMAKE_SOURCE_DIR}/chains/bitnames/app/main.cpp NODE_TARGET bitnames)
+endif()
+
 if(BT_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)

@@ -7,6 +7,9 @@ target_link_libraries(bt_tests PRIVATE bt_test_harness bt_core_test_cases bitnam
 if(BT_WITH_NET)
   target_sources(bt_tests PRIVATE test_bitnames_side_tips.cpp)
   target_link_libraries(bt_tests PRIVATE bitnames_node)
+  # The app layer (doc/app.md): the LayerTwo RPC the same with it, its reads, the phrase's flows, names, the manifest.
+  target_sources(bt_tests PRIVATE test_bitnames_appui.cpp)
+  target_compile_definitions(bt_tests PRIVATE BT_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 endif()
 target_compile_definitions(bt_tests PRIVATE BT_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 add_test(NAME bt_tests COMMAND bt_tests)

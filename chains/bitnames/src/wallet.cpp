@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include <sodium.h>
+
 namespace bitnames {
 
 using bt::kv::Txn;
@@ -86,6 +88,17 @@ std::optional<bt::ByteArray<64>> Wallet::seed()
     auto v = t.get(W_SEED, Bytes{0});
     if (!v || v->size() != 64) return std::nullopt;
     return bt::ByteArray<64>::from_span(*v);
+}
+
+std::optional<Hash32> Wallet::seed_digest(std::string_view label)
+{
+    std::lock_guard<std::mutex> l(mu_);
+    auto s = seed();
+    if (!s) return std::nullopt;
+    const uint8_t zero = 0;
+    Hash32 h = bt::sha256_parts({ByteSpan(reinterpret_cast<const uint8_t*>(label.data()), label.size()), ByteSpan(&zero, 1), s->span()});
+    sodium_memzero(s->data(), s->size());
+    return h;
 }
 
 bt::ByteArray<64> Wallet::need_seed()
@@ -232,6 +245,14 @@ std::optional<std::string> Wallet::plain_name(const Hash32& name)
 {
     Txn t(*store_);
     auto v = t.get(W_KNOWN_NAMES, name.span());
+    if (!v) return std::nullopt;
+    return std::string(v->begin(), v->end());
+}
+
+std::optional<std::string> Wallet::reserved_name(const Hash32& commitment)
+{
+    Txn t(*store_);
+    auto v = t.get(W_RESERVATIONS, commitment.span());
     if (!v) return std::nullopt;
     return std::string(v->begin(), v->end());
 }

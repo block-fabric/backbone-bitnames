@@ -1,0 +1,23 @@
+{
+  "comment": "What BitNames' app and its pack use of the node's app RPC (doc/app.md): the app's whitelist at the node, the pack's manifest for the unified wallet. Checked against the node's own (AppLayer::manifest) by the tests.",
+  "stem": "bitnames",
+  "name": "BitNames",
+  "hostApi": 1,
+  "networks": ["betanet", "regtest", "signet", "forknet"],
+  "rpcPort": 6002,
+  "p2pPort": 4002,
+  "mainchainUrlFlag": "--bt-mainchain-grpc-url",
+  "protocol": ["webuihost", "describeconfirmation", "webuievents", "webuichosenfile"],
+  "reads": ["getmainchaininfo", "getbalances", "getblockchaininfo", "getnetworkinfo", "uptime",
+            "balance", "bitname_data", "bitnames", "format_deposit_address", "get_best_mainchain_block_hash", "get_best_sidechain_block_hash",
+            "get_block", "get_block_hash", "get_bmm_inclusions", "get_paymail", "get_stxos", "get_transaction", "get_transaction_info",
+            "get_utxos", "get_wallet_addresses", "get_wallet_utxos", "getblockcount", "latest_failed_withdrawal_bundle_height", "list_mempool",
+            "list_peers", "list_stxos", "list_utxos", "mainchain_sync_progress", "my_utxos", "openapi_schema", "pending_withdrawal_bundle",
+            "sidechain_wealth"],
+  "confirmed": ["create_deposit", "create_transfer", "create_transfer_many", "create_withdrawal", "mine", "register_bitname", "reserve_bitname"],
+  "host": ["dropin.overview", "dropin.history", "dropin.newAddress", "dropin.addresses", "dropin.blocks", "dropin.block", "dropin.transaction",
+           "dropin.address", "dropin.search", "dropin.checkAddress", "dropin.peg", "dropin.peers", "dropin.peers.connect", "dropin.peers.forget",
+           "dropin.seed.status", "dropin.seed.prepare", "dropin.seed.create", "dropin.seed.restore", "dropin.seed.show", "dropin.seed.save",
+           "bitnames.names", "bitnames.resolve", "bitnames.directory"],
+  "app": ["stop"]
+}

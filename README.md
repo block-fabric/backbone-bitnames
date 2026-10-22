@@ -34,6 +34,19 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo   # system libsodium, sqli
 build/tests/bt_tests
 ```
 
+## The app (bitnames-app)
+
+Our sidechain app on this node: the sidechain template's window, trusted dialog and interface kit, with pages for
+this chain's data model; the node runs as the app's child, unchanged (consensus and the LayerTwo RPC byte for byte),
+the app talking to its separate, authenticated app RPC. The same pages are a pack for the unified wallet. See
+`doc/app.md` and `core/doc/app.md`.
+
+```
+cmake -S . -B build-app -DBT_BUILD_APP=ON -DBT_KIT_DIR=<sidechain-template repo>   # GTK 3, WebKitGTK 4.1, npm
+~/skydoge/tools/build.sh ~/skydoge/backbone-bitnames build-app
+build-app/chains/bitnames/bitnames-app
+```
+
 ## Cross-build (Windows, mingw-w64 posix)
 
 ```

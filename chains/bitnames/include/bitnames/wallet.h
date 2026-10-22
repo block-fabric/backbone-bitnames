@@ -66,6 +66,10 @@ public:
     Authorization sign_arbitrary_msg_as_addr(const Address& a, const std::string& msg);
     Bytes decrypt_msg(const bt::ByteArray<32>& epk, ByteSpan ciphertext);
     std::optional<std::string> plain_name(const Hash32& name);
+    /** The name, in words, a reservation of this wallet commits to (its commitment), or nothing. */
+    std::optional<std::string> reserved_name(const Hash32& commitment);
+    /** SHA-256(label 0x00 seed), or nothing without a seed: a public fingerprint of the seed (the app layer's), never the seed. */
+    std::optional<Hash32> seed_digest(std::string_view label);
 
     // key derivation (exposed for tests and differential checks)
     static bt::ed25519_bip32::XPrv master_xprv(const bt::ByteArray<64>& seed);
