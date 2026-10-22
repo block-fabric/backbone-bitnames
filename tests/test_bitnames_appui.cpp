@@ -321,6 +321,21 @@ TEST(appui_names_words_only_to_a_wallet_reader_and_asked)
         refused = std::string{e.what()}.find("coin") != std::string::npos;
     }
     CHECK(refused);
+    // Names that would not read as what they are in the trusted dialog: refused before any question (a line break,
+    // a direction mark, an invisible character, text that is not UTF-8).
+    for (const char* bad : {"back\nbone", "back\xe2\x80\xae" "bone", "back\xe2\x80\x8b" "bone", "\xc3\x28", "back\x7f"}) {
+        UniValue q{UniValue::VARR};
+        q.push_back(bad);
+        bool no{false};
+        try {
+            layer.host().describe("register_bitname", q, "app");
+        } catch (const bt::appui::RpcError& e) {
+            no = std::string{e.what()}.find("name") != std::string::npos || std::string{e.what()}.find("UTF-8") != std::string::npos;
+            if (!no) std::fprintf(stderr, "  %s\n", e.what());
+        }
+        if (!no) std::fprintf(stderr, "  not refused: %s\n", UniValue{bad}.write().c_str());
+        CHECK(no);
+    }
     // A registration: asked with the name and each record it sets, as the node parses them.
     UniValue data{UniValue::VOBJ};
     data.pushKV("socket_addr_v4", "203.0.113.7:443");

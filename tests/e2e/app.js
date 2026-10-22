@@ -157,6 +157,14 @@
     await sleep(1000);
     const shownQ = (await host('test.confirmed')).filter((q) => q.kind === 'node:phrase.show');
     await check('showing the phrase is a question of the trusted dialog', shownQ.length === 1);
+
+    // ---- saved to a file the user chose: asked, then written (the runner checks the file: owner-only, the words)
+    await host('test.fileAnswer', { path: window.__E2E.saveFile });
+    await host('test.confirmAnswer', { yes: true });
+    await click('Save it to a file');
+    await waitFor('the phrase saved', async () => (await host('test.confirmed')).some((q) => q.kind === 'node:phrase.save'), 30000);
+    await sleep(1500);
+    await log(`SIGNAL phrase-saved ${window.__E2E.saveFile}`);
   } catch (e) {
     await check('the run', false, e && e.stack ? e.stack : String(e));
   }

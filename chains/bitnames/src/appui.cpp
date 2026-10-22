@@ -24,6 +24,46 @@ using bt::appui::Row;
 using bt::appui::RpcError;
 
 namespace {
+/**
+ * Why a name cannot be reserved or registered through our app ("" when it can): 1 to 255 bytes of valid UTF-8, no
+ * control character (C0, DEL, C1: a line break would add lines to the trusted dialog) and no mark that turns or hides
+ * text (bidi controls, zero-width characters, the BOM). LayerTwo's rules take any text; ours keep a name what it reads.
+ */
+std::string name_problem(const std::string& name)
+{
+    if (name.empty() || name.size() > 255) return "A name of 1 to 255 bytes";
+    for (size_t i{0}; i < name.size();) {
+        const auto c{static_cast<unsigned char>(name[i])};
+        uint32_t cp;
+        size_t n;
+        if (c < 0x80) {
+            cp = c, n = 1;
+        } else if ((c & 0xe0) == 0xc0) {
+            cp = c & 0x1f, n = 2;
+        } else if ((c & 0xf0) == 0xe0) {
+            cp = c & 0x0f, n = 3;
+        } else if ((c & 0xf8) == 0xf0) {
+            cp = c & 0x07, n = 4;
+        } else {
+            return "Not valid UTF-8 text";
+        }
+        if (i + n > name.size()) return "Not valid UTF-8 text";
+        for (size_t k{1}; k < n; ++k) {
+            const auto d{static_cast<unsigned char>(name[i + k])};
+            if ((d & 0xc0) != 0x80) return "Not valid UTF-8 text";
+            cp = (cp << 6) | (d & 0x3f);
+        }
+        const bool overlong{(n == 2 && cp < 0x80) || (n == 3 && cp < 0x800) || (n == 4 && cp < 0x10000)};
+        if (overlong || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "Not valid UTF-8 text";
+        if (cp < 0x20 || (cp >= 0x7f && cp <= 0x9f)) return "No control characters in a name";
+        if (cp == 0x061c || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2060 && cp <= 0x2069) || cp == 0xfeff) {
+            return "No invisible or direction marks in a name";
+        }
+        i += n;
+    }
+    return {};
+}
+
 const char* WALLET_NAME = "main";
 /** The LayerTwo read that stands for knowing the wallet's addresses: what tells a caller which outputs are the wallet's. */
 const char* WALLET_READ = "get_wallet_addresses";
@@ -899,7 +939,7 @@ struct AppLayer::Impl {
             },
             [this](const UniValue& p) {
                 const std::string name{p[0].get_str()};
-                if (name.empty() || name.size() > 255) throw HostError(bt::appui::HOST_INVALID_REQUEST, "A name of 1 to 255 characters");
+                if (const std::string why{name_problem(name)}; !why.empty()) throw HostError(bt::appui::HOST_INVALID_REQUEST, why);
                 if (node.bitname_current(name_hash(name))) throw HostError(bt::appui::HOST_INVALID_REQUEST, "This name is registered already");
                 // Their wallet reserves without an input when it has no coin, a reservation anyone can replay: ours asks
                 // for a coin first (spent back to the wallet, no fee).
@@ -927,6 +967,7 @@ struct AppLayer::Impl {
             },
             [this](const UniValue& p) {
                 const std::string name{p[0].get_str()};
+                if (const std::string why{name_problem(name)}; !why.empty()) throw HostError(bt::appui::HOST_INVALID_REQUEST, why);
                 if (node.bitname_current(name_hash(name))) throw HostError(bt::appui::HOST_INVALID_REQUEST, "This name is registered already");
                 Question q;
                 q.title = "Register the name " + name;
@@ -1401,8 +1442,10 @@ bool AppLayer::start(std::string& err)
         const std::string id{str_param(p, "id")};
         auto phrase{m.phrases.get(id)};
         if (!phrase) throw HostError(bt::appui::HOST_INVALID_REQUEST, "This new phrase is not known any more (5 minutes): make another");
+        const bt::appui::WipeOnExit wipe_phrase{*phrase};
         if (m.wallet.has_seed()) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet has a backup phrase already");
         Question q;
+        const bt::appui::WipeOnExit wipe_words{q.details};
         q.title = "Your backup phrase";
         q.message = "Write these 12 words down, in order, on paper, and keep them safe. They are the only way to get this wallet back. "
                     "Anyone who has them can take its coins. They are not shown to the app's pages.";
@@ -1418,9 +1461,10 @@ bool AppLayer::start(std::string& err)
     P["dropin.seed.create"] = {"set_seed_from_mnemonic"};
     H["dropin.seed.restore"] = [&m](const UniValue& p, HostEnv& env) {
         std::string phrase{str_param(p, "phrase")};
+        const bt::appui::WipeOnExit wipe_typed{phrase};
         auto parsed{bt::hd::parse_mnemonic(phrase)};
-        sodium_memzero(phrase.data(), phrase.size());
-        if (!parsed) throw HostError(bt::appui::HOST_INVALID_REQUEST, bt::hd::mnemonic_error(str_param(p, "phrase")));
+        if (!parsed) throw HostError(bt::appui::HOST_INVALID_REQUEST, bt::hd::mnemonic_error(phrase));
+        const bt::appui::WipeOnExit wipe_parsed{*parsed};
         if (m.wallet.has_seed()) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet has a backup phrase already");
         auto seed{bt::hd::mnemonic_to_seed(*parsed)};
         const std::string fp{bt::appui::seed_fingerprint(seed.span())};
@@ -1439,7 +1483,9 @@ bool AppLayer::start(std::string& err)
     H["dropin.seed.show"] = [&m](const UniValue&, HostEnv& env) {
         auto phrase{m.kept_phrase()};
         if (!phrase) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet's phrase was not set through the app: keep the backup you made then");
+        const bt::appui::WipeOnExit wipe_phrase{*phrase};
         Question q;
+        const bt::appui::WipeOnExit wipe_words{q.details};
         q.title = "Your backup phrase";
         q.message = "Make sure nobody can see your screen. Anyone who has these words can take this wallet's coins.";
         q.details = Impl::words_block(*phrase);
@@ -1448,7 +1494,6 @@ bool AppLayer::start(std::string& err)
         q.level = "warning";
         q.kind = "phrase.show";
         env.ask(q);
-        sodium_memzero(phrase->data(), phrase->size());
         return UniValue{true};
     };
     H["dropin.seed.save"] = [&m](const UniValue& p, HostEnv& env) {
@@ -1456,6 +1501,7 @@ bool AppLayer::start(std::string& err)
         const auto file{env.file(path, true)};
         auto phrase{m.kept_phrase()};
         if (!phrase) throw HostError(bt::appui::RPC_WALLET_ERROR, "This wallet's phrase was not set through the app: keep the backup you made then");
+        const bt::appui::WipeOnExit wipe_phrase{*phrase};
         Question q;
         q.title = "Save your backup phrase to a file";
         q.message = "Anyone who can read this file can take this wallet's coins. Keep it somewhere only you can reach, off this computer if you can.";
@@ -1463,13 +1509,13 @@ bool AppLayer::start(std::string& err)
         q.accept = "Save";
         q.kind = "phrase.save";
         if (!env.ask(q).accepted) throw HostError(bt::appui::HOST_CANCELLED, "Cancelled");
+        std::string content{"BitNames backup phrase (BIP-39, plain_bitnames keys)\n" + *phrase + "\n"};
+        const bt::appui::WipeOnExit wipe_content{content};
         try {
-            bt::appui::ChosenFiles::write(file, "BitNames backup phrase (BIP-39, plain_bitnames keys)\n" + *phrase + "\n");
+            bt::appui::ChosenFiles::write(file, content);
         } catch (const std::runtime_error& e) {
-            sodium_memzero(phrase->data(), phrase->size());
             throw HostError(std::string{"The file chosen cannot be written: "} + e.what());
         }
-        sodium_memzero(phrase->data(), phrase->size());
         return UniValue{true};
     };
     // ---- BitNames' own: the wallet's names, a name looked up, the directory of every name.
@@ -1591,7 +1637,7 @@ UniValue AppLayer::manifest() const
         host.push_back(h);
     o.pushKV("host", host);
     UniValue protocol{UniValue::VARR};
-    for (const char* p : {"webuihost", "describeconfirmation", "webuievents", "webuichosenfile"}) protocol.push_back(p);
+    for (const char* p : {"webuihost", "describeconfirmation", "webuievents", "webuichosenfile", "appserverproof"}) protocol.push_back(p);
     o.pushKV("protocol", protocol);
     return o;
 }

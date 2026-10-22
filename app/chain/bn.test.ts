@@ -84,6 +84,8 @@ describe('BitNames pages', () => {
     expect(nameProblem('')).toBe('Type a name');
     expect(nameProblem(' a')).toBe('No spaces around it');
     expect(nameProblem('a\nb')).toBe('No control characters');
+    expect(nameProblem('a\u202eb')).toBe('No invisible or direction marks');
+    expect(nameProblem('a\u200bb')).toBe('No invisible or direction marks');
     expect(nameProblem('é'.repeat(128))).toBe('At most 255 bytes');
     expect(nameProblem('backbone')).toBe('');
     expect(records({ seq_id: '1', commitment: [1, 255], socket_addr_v4: '1.2.3.4:5', socket_addr_v6: null, encryption_pubkey: null, signing_pubkey: null, paymail_fee_sats: 0 })).toEqual([

@@ -56,11 +56,13 @@ export function records(d: NameData | undefined): [string, string][] {
   return out;
 }
 
-/** What a name may be (their rules take any UTF-8 text; ours keep it to one line, at most 255 bytes). */
+/** What a name may be (their rules take any UTF-8 text; ours keep it one line that reads as it is, at most 255 bytes: as
+ *  the node's describers check). */
 export function nameProblem(name: string): string {
   if (!name) return 'Type a name';
   if (new TextEncoder().encode(name).length > 255) return 'At most 255 bytes';
-  if (/[\u0000-\u001f\u007f]/.test(name)) return 'No control characters';
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(name)) return 'No control characters';
+  if (/[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/.test(name)) return 'No invisible or direction marks';
   if (name !== name.trim()) return 'No spaces around it';
   return '';
 }

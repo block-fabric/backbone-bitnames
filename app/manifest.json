@@ -7,7 +7,7 @@
   "rpcPort": 6002,
   "p2pPort": 4002,
   "mainchainUrlFlag": "--bt-mainchain-grpc-url",
-  "protocol": ["webuihost", "describeconfirmation", "webuievents", "webuichosenfile"],
+  "protocol": ["webuihost", "describeconfirmation", "webuievents", "webuichosenfile", "appserverproof"],
   "reads": ["getmainchaininfo", "getbalances", "getblockchaininfo", "getnetworkinfo", "uptime",
             "balance", "bitname_data", "bitnames", "format_deposit_address", "get_best_mainchain_block_hash", "get_best_sidechain_block_hash",
             "get_block", "get_block_hash", "get_bmm_inclusions", "get_paymail", "get_stxos", "get_transaction", "get_transaction_info",
