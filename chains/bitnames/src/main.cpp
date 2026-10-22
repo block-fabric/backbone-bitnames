@@ -91,6 +91,11 @@ static void usage()
 
 int main(int argc, char** argv)
 {
+#ifndef _WIN32
+    // A gRPC (TLS) or RPC peer that goes away must not kill the node with SIGPIPE: a stopped
+    // or restarting enforcer did exactly that (found by the zSide drop-in, regtest 2026-10-22).
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     NodeConfig cfg;
     cfg.datadir = default_datadir();
     std::optional<std::string> log_dir, wallet_dir, mnemonic_path, grpc_url;
