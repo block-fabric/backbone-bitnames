@@ -49,6 +49,7 @@ struct PeerView {
     bt::quic::SockAddr address;
     bool connected = false;
     bool inbound = false;
+    std::string name; // bt::quic::Endpoint::peer_name: "<Name> <version>", "unknown (upstream)", "unknown"; empty until connected
 };
 
 /** types/lib.rs MainchainSyncProgress */
@@ -174,6 +175,7 @@ private:
         bt::quic::SockAddr addr;
         std::string dial;
         bool connected = false, inbound = false;
+        std::string name; // bt::quic::Endpoint::peer_name
         std::optional<bt::sidechain::PeerState> state;
         bool bodies_chain = false; // a request_bodies chain is running for this peer
         int64_t last_sync_try = 0; // when its tip was last looked at (handle_peer_state)

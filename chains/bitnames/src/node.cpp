@@ -74,7 +74,8 @@ bool Node::start(std::string& err)
             p.addr = a;
             p.inbound = inbound;
             p.connected = true;
-            LOG_INFO("peer %s connected (%s)", a.to_string().c_str(), inbound ? "inbound" : "outbound");
+            p.name = ep_->peer_name(c);
+            LOG_INFO("peer %s connected (%s, %s)", a.to_string().c_str(), inbound ? "inbound" : "outbound", p.name.c_str());
         };
         // never take the node lock on the QUIC I/O thread
         cb.on_request = [this](bt::quic::ConnId c, int64_t s, Bytes p) { post_serve([this, c, s, p = std::move(p)]() mutable { on_request(c, s, std::move(p)); }); };
@@ -321,7 +322,7 @@ std::vector<PeerView> Node::peers()
 {
     std::lock_guard<std::mutex> l(peers_mu_);
     std::vector<PeerView> r;
-    for (auto& [c, p] : peers_) r.push_back({p.addr, p.connected, p.inbound});
+    for (auto& [c, p] : peers_) r.push_back({p.addr, p.connected, p.inbound, p.name});
     return r;
 }
 SyncProgress Node::sync_progress()
