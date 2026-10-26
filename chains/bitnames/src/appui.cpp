@@ -579,7 +579,8 @@ struct AppLayer::Impl {
     bt::appui::NodeLook look()
     {
         bt::appui::NodeLook l;
-        l.height = node.height();
+        // Its height, its peers and the best height they told of, the mainchain read: the sync status (sync_state).
+        bt::appui::look_at_node(l, node, network);
         if (auto t{node.tip()}) {
             l.tip = bt::hex_encode(*t);
             if (auto hd{node.header(*t)}) {
@@ -591,7 +592,6 @@ struct AppLayer::Impl {
         if (link && link->connected() && link->info().find_value("state").getValStr() == "ok") {
             if (auto tm{link->tip_time()}) l.tip_time = std::max(l.tip_time, *tm);
         }
-        for (auto& p : node.peers()) l.connections += p.connected ? 1 : 0;
         l.wallet = wallet.has_seed();
         if (l.wallet) {
             const auto mine{addresses()};
@@ -1172,11 +1172,16 @@ bool AppLayer::start(std::string& err)
         auto h{m.node.height()};
         auto t{m.node.tip()};
         o.pushKV("chain", m.network);
+        // The sync status every page shows (bt::appui::sync_state): headers the best height known, in initial download
+        // until up to date.
+        bt::appui::NodeLook l;
+        bt::appui::look_at_node(l, m.node, m.network);
+        const bt::appui::SyncState sync{bt::appui::sync_state(l)};
         o.pushKV("blocks", h ? int64_t(*h) : int64_t{-1});
-        o.pushKV("headers", h ? int64_t(*h) : int64_t{-1});
+        o.pushKV("headers", sync.target ? int64_t(*sync.target) : h ? int64_t(*h) : int64_t{-1});
         o.pushKV("bestblockhash", t ? bt::hex_encode(*t) : "");
-        o.pushKV("initialblockdownload", false);
-        o.pushKV("verificationprogress", 1.0);
+        o.pushKV("initialblockdownload", sync.kind != bt::appui::SyncState::Synced);
+        o.pushKV("verificationprogress", sync.kind == bt::appui::SyncState::Synced ? 1.0 : sync.target && *sync.target ? double(sync.height) / *sync.target : 0.0);
         o.pushKV("warnings", UniValue{UniValue::VARR});
         return o;
     });

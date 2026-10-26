@@ -322,7 +322,11 @@ std::vector<PeerView> Node::peers()
 {
     std::lock_guard<std::mutex> l(peers_mu_);
     std::vector<PeerView> r;
-    for (auto& [c, p] : peers_) r.push_back({p.addr, p.connected, p.inbound, p.name});
+    for (auto& [c, p] : peers_) {
+        std::optional<uint32_t> h;
+        if (p.state && p.state->tip_info) h = p.state->tip_info->block_height;
+        r.push_back({p.addr, p.connected, p.inbound, p.name, h});
+    }
     return r;
 }
 SyncProgress Node::sync_progress()

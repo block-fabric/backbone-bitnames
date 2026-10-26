@@ -50,6 +50,9 @@ struct PeerView {
     bool connected = false;
     bool inbound = false;
     std::string name; // bt::quic::Endpoint::peer_name: "<Name> <version>", "unknown (upstream)", "unknown"; empty until connected
+    /** The height of the tip the peer last told of (its PeerState), unchecked: what the app's sync status compares ours
+     *  with (bt::appui::sync_state), never what the node follows. */
+    std::optional<uint32_t> tip_height;
 };
 
 /** types/lib.rs MainchainSyncProgress */
